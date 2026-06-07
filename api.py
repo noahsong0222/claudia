@@ -4,14 +4,19 @@ import shutil
 import uuid
 from datetime import datetime
 from pathlib import Path
+from typing import List
 
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from ingest import ingest_file, get_classes, get_files, _collection, _embeddings, _splitter
+from ingest import (
+    ingest_file, get_classes, get_files, get_all_tags, update_file_tags,
+    extract_preview, decode_tags, AUDIO_EXTS,
+    _collection, _embeddings, _splitter,
+)
 from rag import search, get_all_chunks, _llm, _SYSTEM
 from langchain_core.messages import HumanMessage, SystemMessage
 
@@ -46,10 +51,19 @@ def classes():
     return {"classes": get_classes()}
 
 
+@app.get("/tags")
+def tags():
+    return {"tags": get_all_tags()}
+
+
 # ── ingest ─────────────────────────────────────────────────────────────────────
 
 @app.post("/ingest")
-async def ingest(file: UploadFile = File(...), class_name: str = Form("General")):
+async def ingest(
+    file: UploadFile = File(...),
+    class_name: str = Form("General"),
+    tags: str = Form(""),            # comma-separated tag string from form
+):
     existing = get_files()
     if any(f["filename"] == file.filename for f in existing):
         raise HTTPException(status_code=409, detail=f"'{file.filename}' is already ingested. Delete it first to re-ingest.")
@@ -59,14 +73,50 @@ async def ingest(file: UploadFile = File(...), class_name: str = Form("General")
         shutil.copyfileobj(file.file, tmp)
         tmp_path = tmp.name
 
+    tag_list = [t.strip() for t in tags.split(",") if t.strip()]
+
     try:
-        result = ingest_file(tmp_path, class_name)
+        result = ingest_file(tmp_path, class_name, tag_list)
         dest = UPLOADS_DIR / file.filename
         Path(tmp_path).rename(dest)
         return result
     except Exception as e:
+        Path(tmp_path).unlink(missing_ok=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
+# ── auto-tag suggestion ────────────────────────────────────────────────────────
+
+class SuggestRequest(BaseModel):
+    filename: str
+    existing_classes: list[str] = []
+
+
+@app.post("/suggest-class")
+async def suggest_class(req: SuggestRequest):
+    """
+    Given a filename (and optionally a text preview after upload),
+    ask the LLM to suggest the most fitting class name.
+    """
+    existing = ", ".join(req.existing_classes) if req.existing_classes else "none yet"
+    prompt = (
+        f"A student is uploading a file named: {req.filename!r}\n\n"
+        f"Existing class/subject names in their library: {existing}\n\n"
+        "Suggest the most likely academic subject or class name for this file. "
+        "If it matches an existing class name, return that exact name. "
+        "Otherwise suggest a short, clean name (e.g. 'Biology 101', 'AP Chemistry', 'History Notes'). "
+        "Reply with ONLY the class name, nothing else."
+    )
+    messages = [
+        SystemMessage(content="You are a helpful assistant that categorizes academic files."),
+        HumanMessage(content=prompt),
+    ]
+    response = _llm.invoke(messages)
+    suggestion = response.content.strip().strip('"').strip("'")
+    return {"suggestion": suggestion}
+
+
+# ── file operations ────────────────────────────────────────────────────────────
 
 @app.get("/files/{filename}/text")
 def file_text(filename: str):
@@ -93,6 +143,21 @@ def delete_file(filename: str):
     if upload_path.exists():
         upload_path.unlink()
     return {"deleted": filename, "chunks_removed": len(ids)}
+
+
+# ── tag management ─────────────────────────────────────────────────────────────
+
+class TagUpdateRequest(BaseModel):
+    tags: list[str]
+
+
+@app.put("/files/{filename}/tags")
+def update_tags(filename: str, req: TagUpdateRequest):
+    existing = get_files()
+    if not any(f["filename"] == filename for f in existing):
+        raise HTTPException(status_code=404, detail="File not found")
+    count = update_file_tags(filename, req.tags)
+    return {"filename": filename, "tags": req.tags, "chunks_updated": count}
 
 
 # ── chat ───────────────────────────────────────────────────────────────────────
@@ -221,7 +286,7 @@ class ExplainRequest(BaseModel):
     topic: str
     class_name: str | None = None
     filename: str | None = None
-    level: str = "normal"  # simple | normal | deep
+    level: str = "normal"
 
 
 @app.post("/explain")
@@ -233,11 +298,10 @@ async def explain(req: ExplainRequest):
     context = "\n\n---\n\n".join(
         f"[{c['metadata']['filename']}]\n{c['text']}" for c in chunks
     )
-
     level_instruction = {
         "simple": "Explain as if to a complete beginner. Use analogies, avoid jargon.",
         "normal": "Explain clearly for a student learning the topic.",
-        "deep": "Give a thorough, technical explanation with nuance and edge cases.",
+        "deep":   "Give a thorough, technical explanation with nuance and edge cases.",
     }.get(req.level, "Explain clearly for a student learning the topic.")
 
     prompt = (
@@ -291,10 +355,8 @@ def quiz(req: QuizRequest):
         HumanMessage(content=prompt),
     ]
     response = _llm.invoke(messages)
-
     text = response.content.strip()
-    start = text.find("[")
-    end = text.rfind("]") + 1
+    start, end = text.find("["), text.rfind("]") + 1
     if start == -1 or end == 0:
         raise HTTPException(status_code=500, detail="Model did not return valid quiz JSON.")
     try:
@@ -319,11 +381,11 @@ def semantic_search(req: SearchRequest):
     return {
         "results": [
             {
-                "text": r["text"],
-                "filename": r["metadata"]["filename"],
-                "class_name": r["metadata"].get("class_name", "General"),
+                "text":        r["text"],
+                "filename":    r["metadata"]["filename"],
+                "class_name":  r["metadata"].get("class_name", "General"),
                 "chunk_index": r["metadata"].get("chunk_index", 0),
-                "score": round(1 - r["distance"], 3),
+                "score":       round(1 - r["distance"], 3),
             }
             for r in results
         ],
@@ -335,8 +397,9 @@ def semantic_search(req: SearchRequest):
 
 @app.get("/stats")
 def stats():
-    all_files = get_files()
+    all_files   = get_files()
     all_classes = get_classes()
+    all_tags    = get_all_tags()
     total_chunks = _collection.count()
 
     by_class: dict[str, dict] = {}
@@ -353,11 +416,15 @@ def stats():
             if cn in by_class:
                 by_class[cn]["chunks"] += 1
 
+    audio_files = sum(1 for f in all_files if f.get("file_type") == "audio")
+
     return {
-        "total_chunks": total_chunks,
-        "total_files": len(all_files),
+        "total_chunks":  total_chunks,
+        "total_files":   len(all_files),
         "total_classes": len(all_classes),
-        "by_class": by_class,
+        "total_tags":    len(all_tags),
+        "audio_files":   audio_files,
+        "by_class":      by_class,
     }
 
 
@@ -392,10 +459,8 @@ def flashcards(req: FlashcardRequest):
         HumanMessage(content=prompt),
     ]
     response = _llm.invoke(messages)
-
     text = response.content.strip()
-    start = text.find("[")
-    end = text.rfind("]") + 1
+    start, end = text.find("["), text.rfind("]") + 1
     if start == -1 or end == 0:
         raise HTTPException(status_code=500, detail="Model did not return valid flashcards.")
     try:
@@ -411,6 +476,7 @@ class NoteRequest(BaseModel):
     text: str
     class_name: str = "General"
     title: str = ""
+    tags: list[str] = []
 
 
 @app.post("/note")
@@ -418,19 +484,27 @@ def note(req: NoteRequest):
     if not req.text.strip():
         raise HTTPException(status_code=400, detail="Note text is empty.")
 
-    title = req.title.strip() or f"note-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
+    title      = req.title.strip() or f"note-{datetime.now().strftime('%Y%m%d-%H%M%S')}"
     ingested_at = datetime.now().isoformat(timespec="seconds")
+    from ingest import encode_tags
+    tags_str   = encode_tags(req.tags)
 
-    chunks = _splitter.split_text(req.text)
+    chunks  = _splitter.split_text(req.text)
     vectors = _embeddings.embed_documents(chunks)
-    ids = [str(uuid.uuid4()) for _ in chunks]
+    ids     = [str(uuid.uuid4()) for _ in chunks]
     metadatas = [
-        {"filename": title, "class_name": req.class_name,
-         "ingested_at": ingested_at, "chunk_index": i, "type": "note"}
+        {
+            "filename":    title,
+            "class_name":  req.class_name,
+            "ingested_at": ingested_at,
+            "chunk_index": i,
+            "tags":        tags_str,
+            "file_type":   "note",
+        }
         for i in range(len(chunks))
     ]
     _collection.add(ids=ids, embeddings=vectors, documents=chunks, metadatas=metadatas)
-    return {"title": title, "class_name": req.class_name, "chunk_count": len(chunks)}
+    return {"title": title, "class_name": req.class_name, "tags": req.tags, "chunk_count": len(chunks)}
 
 
 # ── /graph ─────────────────────────────────────────────────────────────────────
@@ -441,22 +515,27 @@ def graph():
     if _collection.count() == 0:
         return {"nodes": [], "edges": []}
 
-    result = _collection.get(include=["embeddings", "metadatas"])
+    result    = _collection.get(include=["embeddings", "metadatas"])
     embeddings = np.array(result["embeddings"])
-    metadatas = result["metadatas"]
+    metadatas  = result["metadatas"]
 
     file_chunks: dict[str, list[int]] = {}
-    file_meta: dict[str, dict] = {}
+    file_meta:   dict[str, dict]      = {}
     for i, m in enumerate(metadatas):
         fn = m["filename"]
         file_chunks.setdefault(fn, []).append(i)
-        file_meta[fn] = {"filename": fn, "class_name": m.get("class_name", "General")}
+        file_meta[fn] = {
+            "filename":  fn,
+            "class_name": m.get("class_name", "General"),
+            "tags":       decode_tags(m.get("tags", "")),
+            "file_type":  m.get("file_type", "document"),
+        }
 
     filenames = list(file_chunks.keys())
 
     def centroid(idxs):
         vecs = embeddings[idxs]
-        c = vecs.mean(axis=0)
+        c    = vecs.mean(axis=0)
         norm = np.linalg.norm(c)
         return c / norm if norm > 0 else c
 
@@ -466,13 +545,23 @@ def graph():
         for i in range(len(filenames)):
             for j in range(i + 1, len(filenames)):
                 a, b = filenames[i], filenames[j]
-                sim = float(np.dot(centroids[a], centroids[b]))
+                sim  = float(np.dot(centroids[a], centroids[b]))
                 if sim > 0.3:
                     edges.append({"source": a, "target": b, "weight": round(sim, 3)})
 
-    classes = list({file_meta[fn]["class_name"] for fn in filenames})
+    classes     = list({file_meta[fn]["class_name"] for fn in filenames})
     class_nodes = [{"id": c, "type": "class"} for c in classes]
-    file_nodes = [{"id": fn, "type": "file", "class_name": file_meta[fn]["class_name"], "chunk_count": len(file_chunks[fn])} for fn in filenames]
+    file_nodes  = [
+        {
+            "id":          fn,
+            "type":        "file",
+            "class_name":  file_meta[fn]["class_name"],
+            "tags":        file_meta[fn]["tags"],
+            "file_type":   file_meta[fn]["file_type"],
+            "chunk_count": len(file_chunks[fn]),
+        }
+        for fn in filenames
+    ]
     class_edges = [{"source": fn, "target": file_meta[fn]["class_name"], "weight": 0.5} for fn in filenames]
 
     return {"nodes": file_nodes + class_nodes, "edges": edges + class_edges}

@@ -1,5 +1,6 @@
 import os
 import uuid
+import json
 import shutil
 from datetime import datetime
 from pathlib import Path
@@ -24,6 +25,23 @@ _splitter = RecursiveCharacterTextSplitter(
     separators=["\n\n", "\n", ". ", " ", ""],
 )
 
+AUDIO_EXTS = {".mp3", ".mp4", ".wav", ".m4a", ".webm", ".ogg", ".flac", ".mov", ".mkv"}
+IMAGE_EXTS  = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif", ".gif"}
+
+# lazy whisper model – loaded on first audio ingest
+_whisper_model = None
+
+
+def _get_whisper():
+    global _whisper_model
+    if _whisper_model is None:
+        from faster_whisper import WhisperModel
+        print("Loading Whisper model (first run – downloads ~150 MB)…")
+        _whisper_model = WhisperModel("base", device="cpu", compute_type="int8")
+    return _whisper_model
+
+
+# ── extractors ─────────────────────────────────────────────────────────────────
 
 def _extract_pdf(path: Path) -> str:
     from pypdf import PdfReader
@@ -32,7 +50,6 @@ def _extract_pdf(path: Path) -> str:
     text = "\n\n".join(pages).strip()
     if text:
         return text
-    # OCR fallback via PyMuPDF if installed
     try:
         import fitz
         doc = fitz.open(str(path))
@@ -56,22 +73,58 @@ def _extract_docx(path: Path) -> str:
     return "\n\n".join(p.text for p in doc.paragraphs if p.text.strip())
 
 
+def _extract_audio(path: Path) -> str:
+    """Transcribe audio/video using faster-whisper (runs fully locally)."""
+    model = _get_whisper()
+    print(f"Transcribing {path.name} (this may take a minute)…")
+    segments, info = model.transcribe(str(path), beam_size=5)
+    print(f"  Detected language: {info.language} ({info.language_probability:.0%} confidence)")
+    text = " ".join(seg.text.strip() for seg in segments)
+    return text.strip()
+
+
 def extract_text(path: Path) -> str:
     suffix = path.suffix.lower()
     if suffix == ".pdf":
         return _extract_pdf(path)
-    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tiff", ".tif", ".gif"}:
+    if suffix in IMAGE_EXTS:
         return _extract_image(path)
     if suffix in {".docx", ".doc"}:
         return _extract_docx(path)
+    if suffix in AUDIO_EXTS:
+        return _extract_audio(path)
     raise ValueError(f"Unsupported file type: {suffix}")
 
 
-def ingest_file(source_path: str | Path, class_name: str = "General") -> dict:
-    """
-    Ingest a file into Chroma.
-    class_name: the course or category this file belongs to.
-    """
+def is_audio(path: Path) -> bool:
+    return path.suffix.lower() in AUDIO_EXTS
+
+
+# ── tags helpers ───────────────────────────────────────────────────────────────
+
+def encode_tags(tags: list[str]) -> str:
+    """Encode tag list as a JSON string for ChromaDB storage."""
+    cleaned = [t.strip().lower() for t in tags if t.strip()]
+    return json.dumps(sorted(set(cleaned)))
+
+
+def decode_tags(tags_str: str | None) -> list[str]:
+    if not tags_str:
+        return []
+    try:
+        return json.loads(tags_str)
+    except Exception:
+        # legacy: comma-separated plain string
+        return [t.strip() for t in tags_str.split(",") if t.strip()]
+
+
+# ── ingest ─────────────────────────────────────────────────────────────────────
+
+def ingest_file(
+    source_path: str | Path,
+    class_name: str = "General",
+    tags: list[str] | None = None,
+) -> dict:
     source_path = Path(source_path)
     if not source_path.exists():
         raise FileNotFoundError(source_path)
@@ -80,9 +133,11 @@ def ingest_file(source_path: str | Path, class_name: str = "General") -> dict:
     if source_path.resolve() != dest.resolve():
         shutil.copy2(source_path, dest)
 
-    filename = dest.name
+    filename    = dest.name
     ingested_at = datetime.now().isoformat(timespec="seconds")
-    class_name = class_name.strip() or "General"
+    class_name  = class_name.strip() or "General"
+    tags_str    = encode_tags(tags or [])
+    file_type   = "audio" if is_audio(dest) else "document"
 
     print(f"Extracting text from {filename}…")
     text = extract_text(dest)
@@ -98,10 +153,12 @@ def ingest_file(source_path: str | Path, class_name: str = "General") -> dict:
     ids = [str(uuid.uuid4()) for _ in chunks]
     metadatas = [
         {
-            "filename": filename,
-            "class_name": class_name,
+            "filename":    filename,
+            "class_name":  class_name,
             "ingested_at": ingested_at,
             "chunk_index": i,
+            "tags":        tags_str,
+            "file_type":   file_type,
         }
         for i in range(len(chunks))
     ]
@@ -111,39 +168,82 @@ def ingest_file(source_path: str | Path, class_name: str = "General") -> dict:
     total = _collection.count()
     print(f"Done. {len(chunks)} chunks stored (total: {total}).")
     return {
-        "filename": filename,
-        "class_name": class_name,
-        "chunk_count": len(chunks),
+        "filename":         filename,
+        "class_name":       class_name,
+        "tags":             decode_tags(tags_str),
+        "file_type":        file_type,
+        "chunk_count":      len(chunks),
         "collection_total": total,
-        "ingested_at": ingested_at,
+        "ingested_at":      ingested_at,
     }
 
 
+# ── preview (for auto-tag suggestion) ─────────────────────────────────────────
+
+def extract_preview(path: Path, max_chars: int = 1500) -> str:
+    """Extract a short text preview without full chunking/embedding. Fast."""
+    try:
+        text = extract_text(path)
+        return text[:max_chars]
+    except Exception:
+        return ""
+
+
+# ── queries ────────────────────────────────────────────────────────────────────
+
 def get_classes() -> list[str]:
-    """Return a sorted list of all class names in the DB."""
     if _collection.count() == 0:
         return []
     all_meta = _collection.get(include=["metadatas"])["metadatas"]
     return sorted({m.get("class_name", "General") for m in all_meta})
 
 
-def get_files() -> list[dict]:
-    """Return a deduplicated list of ingested files with metadata."""
+def get_all_tags() -> list[str]:
+    """Return a sorted list of every tag used across all files."""
     if _collection.count() == 0:
         return []
     all_meta = _collection.get(include=["metadatas"])["metadatas"]
-    seen = {}
+    tags: set[str] = set()
+    for m in all_meta:
+        tags.update(decode_tags(m.get("tags", "")))
+    return sorted(tags)
+
+
+def get_files() -> list[dict]:
+    if _collection.count() == 0:
+        return []
+    all_meta = _collection.get(include=["metadatas"])["metadatas"]
+    seen: dict[str, dict] = {}
     for m in all_meta:
         key = m["filename"]
         if key not in seen:
-            seen[key] = {"filename": m["filename"], "class_name": m.get("class_name", "General"), "ingested_at": m.get("ingested_at", "")}
+            seen[key] = {
+                "filename":    m["filename"],
+                "class_name":  m.get("class_name", "General"),
+                "ingested_at": m.get("ingested_at", ""),
+                "tags":        decode_tags(m.get("tags", "")),
+                "file_type":   m.get("file_type", "document"),
+            }
     return sorted(seen.values(), key=lambda x: x["ingested_at"], reverse=True)
+
+
+def update_file_tags(filename: str, tags: list[str]) -> int:
+    """Update tags on every chunk of a file. Returns chunk count updated."""
+    results = _collection.get(where={"filename": filename}, include=["metadatas"])
+    ids = results["ids"]
+    if not ids:
+        return 0
+    tags_str = encode_tags(tags)
+    updated_metas = [{**m, "tags": tags_str} for m in results["metadatas"]]
+    _collection.update(ids=ids, metadatas=updated_metas)
+    return len(ids)
 
 
 if __name__ == "__main__":
     import sys
     if len(sys.argv) < 2:
-        print("Usage: python ingest.py <file> [class_name]")
+        print("Usage: python ingest.py <file> [class_name] [tag1,tag2]")
         sys.exit(1)
     class_arg = sys.argv[2] if len(sys.argv) > 2 else "General"
-    print(ingest_file(sys.argv[1], class_arg))
+    tags_arg  = sys.argv[3].split(",") if len(sys.argv) > 3 else []
+    print(ingest_file(sys.argv[1], class_arg, tags_arg))

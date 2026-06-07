@@ -6,7 +6,7 @@ const Graph = dynamic(() => import("./components/Graph"), { ssr: false });
 const FileViewer = dynamic(() => import("./components/FileViewer"), { ssr: false });
 
 // ── types ──────────────────────────────────────────────────────────────────────
-interface FileEntry { filename: string; class_name: string; ingested_at: string; }
+interface FileEntry { filename: string; class_name: string; ingested_at: string; tags: string[]; file_type?: string; }
 interface Source { filename: string; class_name: string; chunk_index: number; }
 interface Flashcard { q: string; a: string; }
 interface QuizQuestion { q: string; options: string[]; answer: string; explanation: string; }
@@ -921,14 +921,80 @@ function ChatView({ files, classes, onViewFile, convId, onConvSaved, onNewChat }
   );
 }
 
+// ── tag input component ────────────────────────────────────────────────────────
+function TagInput({ tags, onChange, allTags }: { tags: string[]; onChange: (t: string[]) => void; allTags: string[] }) {
+  const [input, setInput] = useState("");
+  const suggestions = allTags.filter(t => t.includes(input.toLowerCase()) && !tags.includes(t) && input.length > 0);
+
+  function addTag(tag: string) {
+    const clean = tag.trim().toLowerCase();
+    if (clean && !tags.includes(clean)) onChange([...tags, clean]);
+    setInput("");
+  }
+
+  return (
+    <div>
+      <div style={{ fontSize: 9, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 }}>Tags <span style={{ opacity: 0.5 }}>(optional)</span></div>
+      {tags.length > 0 && (
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginBottom: 6 }}>
+          {tags.map(t => (
+            <span key={t} style={{ display: "flex", alignItems: "center", gap: 4, padding: "2px 8px", background: "var(--accent-bg)", border: "1px solid var(--accent)", borderRadius: 20, fontSize: 10, color: "var(--accent)" }}>
+              {t}
+              <button onClick={() => onChange(tags.filter(x => x !== t))} style={{ background: "none", border: "none", color: "var(--accent)", cursor: "pointer", padding: 0, fontSize: 11, lineHeight: 1 }}>×</button>
+            </span>
+          ))}
+        </div>
+      )}
+      <div style={{ position: "relative" }}>
+        <input
+          value={input}
+          onChange={e => setInput(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter" || e.key === ",") { e.preventDefault(); if (input.trim()) addTag(input); } }}
+          placeholder="Add tag, press Enter"
+          style={{
+            width: "100%", background: "var(--panel2)", border: "1px solid var(--line2)",
+            borderRadius: "var(--radius-sm)", padding: "6px 10px", color: "var(--text)",
+            fontFamily: "inherit", fontSize: 12, outline: "none", caretColor: "var(--accent)",
+          }}
+          onFocus={e => e.target.style.borderColor = "var(--accent)"}
+          onBlur={e => { e.target.style.borderColor = "var(--line2)"; }}
+        />
+        {suggestions.length > 0 && (
+          <div style={{ position: "absolute", top: "calc(100% + 4px)", left: 0, right: 0, background: "var(--panel2)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", zIndex: 20, overflow: "hidden" }}>
+            {suggestions.slice(0, 5).map(s => (
+              <button key={s} onMouseDown={() => addTag(s)} style={{ display: "block", width: "100%", textAlign: "left", padding: "6px 10px", background: "none", border: "none", color: "var(--text2)", fontFamily: "inherit", fontSize: 11, cursor: "pointer" }}
+                onMouseEnter={e => e.currentTarget.style.background = "var(--line)"}
+                onMouseLeave={e => e.currentTarget.style.background = "none"}>
+                {s}
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+const AUDIO_EXTS_FE = new Set([".mp3", ".mp4", ".wav", ".m4a", ".webm", ".ogg", ".flac", ".mov", ".mkv"]);
+function isAudio(filename: string) { return AUDIO_EXTS_FE.has(filename.slice(filename.lastIndexOf(".")).toLowerCase()); }
+function fileIcon(f: FileEntry) {
+  if (f.file_type === "audio" || isAudio(f.filename)) return "♪";
+  if (f.file_type === "note") return "✎";
+  return f.filename.split(".").pop()?.toUpperCase() ?? "FILE";
+}
+
 // ── upload view ────────────────────────────────────────────────────────────────
 function UploadView({ files, onRefresh, onViewFile }: { files: FileEntry[]; onRefresh: () => void; onViewFile: (f: string) => void }) {
   const [file, setFile] = useState<File | null>(null);
   const [className, setClassName] = useState("");
+  const [suggesting, setSuggesting] = useState(false);
+  const [tags, setTags] = useState<string[]>([]);
+  const [allTags, setAllTags] = useState<string[]>([]);
   const [status, setStatus] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [search, setSearch] = useState("");
+  const [tagFilter, setTagFilter] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   const [deleting, setDeleting] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
@@ -937,22 +1003,52 @@ function UploadView({ files, onRefresh, onViewFile }: { files: FileEntry[]; onRe
   const grouped: Record<string, FileEntry[]> = {};
   for (const f of files) (grouped[f.class_name || "General"] ??= []).push(f);
 
-  const filtered = search.trim()
-    ? files.filter(f => f.filename.toLowerCase().includes(search.toLowerCase()) || f.class_name.toLowerCase().includes(search.toLowerCase()))
-    : null;
+  useEffect(() => {
+    fetch("/api/tags").then(r => r.json()).then(d => setAllTags(d.tags ?? [])).catch(() => {});
+  }, [files]);
+
+  async function pickFile(f: File) {
+    setFile(f);
+    setStatus(null); setError(null);
+    setSuggesting(true);
+    try {
+      const res = await fetch("/api/suggest-class", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ filename: f.name, existing_classes: Object.keys(grouped) }),
+      });
+      const data = await res.json();
+      if (data.suggestion) setClassName(data.suggestion);
+    } catch { /* silent */ }
+    setSuggesting(false);
+  }
+
+  const filtered = (() => {
+    let list = files;
+    if (tagFilter) list = list.filter(f => f.tags?.includes(tagFilter));
+    if (search.trim()) list = list.filter(f =>
+      f.filename.toLowerCase().includes(search.toLowerCase()) ||
+      f.class_name.toLowerCase().includes(search.toLowerCase()) ||
+      f.tags?.some(t => t.includes(search.toLowerCase()))
+    );
+    return search.trim() || tagFilter ? list : null;
+  })();
 
   async function submit() {
     if (!file) { setError("Select a file first"); return; }
     if (!className.trim()) { setError("Enter a class name"); return; }
     setError(null); setStatus(null); setLoading(true);
+    const isAudioFile = isAudio(file.name);
+    if (isAudioFile) setStatus("Transcribing audio — this may take a minute…");
     const form = new FormData();
-    form.append("file", file); form.append("class_name", className.trim());
+    form.append("file", file);
+    form.append("class_name", className.trim());
+    form.append("tags", tags.join(","));
     try {
       const res = await fetch("/api/ingest", { method: "POST", body: form });
       if (!res.ok) { const e = await res.json(); throw new Error(e.detail ?? "Upload failed"); }
       const data = await res.json();
-      setStatus(`✓ ${data.filename} ingested (${data.chunk_count} chunks)`);
-      setFile(null); setClassName(""); onRefresh();
+      setStatus(`✓ ${data.filename} ingested (${data.chunk_count} chunks${data.file_type === "audio" ? " · transcribed" : ""})`);
+      setFile(null); setClassName(""); setTags([]); onRefresh();
     } catch (e: unknown) {
       setError(e instanceof Error ? e.message : "Upload failed");
     }
@@ -972,7 +1068,7 @@ function UploadView({ files, onRefresh, onViewFile }: { files: FileEntry[]; onRe
   return (
     <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
       {/* left: upload form */}
-      <div style={{ width: 300, flexShrink: 0, borderRight: "1px solid var(--line)", padding: "20px 18px", display: "flex", flexDirection: "column", gap: 16, overflowY: "auto" }}>
+      <div style={{ width: 300, flexShrink: 0, borderRight: "1px solid var(--line)", padding: "20px 18px", display: "flex", flexDirection: "column", gap: 14, overflowY: "auto" }}>
         <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text2)", letterSpacing: "0.05em" }}>Add to brain</div>
 
         {/* drop zone */}
@@ -980,29 +1076,32 @@ function UploadView({ files, onRefresh, onViewFile }: { files: FileEntry[]; onRe
           onClick={() => inputRef.current?.click()}
           onDragOver={e => { e.preventDefault(); setDragging(true); }}
           onDragLeave={() => setDragging(false)}
-          onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) setFile(f); }}
+          onDrop={e => { e.preventDefault(); setDragging(false); const f = e.dataTransfer.files[0]; if (f) pickFile(f); }}
           style={{
             border: `1px dashed ${dragging ? "var(--accent)" : file ? "var(--green)" : "var(--line2)"}`,
-            borderRadius: "var(--radius)", padding: "24px 16px", cursor: "pointer", textAlign: "center",
+            borderRadius: "var(--radius)", padding: "20px 16px", cursor: "pointer", textAlign: "center",
             background: dragging ? "var(--accent-bg)" : file ? "rgba(52,211,153,0.05)" : "var(--panel2)",
             transition: "all 0.15s",
           }}>
-          <div style={{ fontSize: 22, marginBottom: 6 }}>{file ? "✓" : "↑"}</div>
+          <div style={{ fontSize: 22, marginBottom: 6 }}>{file ? (isAudio(file.name) ? "♪" : "✓") : "↑"}</div>
           <div style={{ color: file ? "var(--green)" : "var(--text2)", fontSize: 12 }}>
             {file ? file.name : "Drop file or click to browse"}
           </div>
-          <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4 }}>PDF · PNG · JPG · DOCX</div>
+          <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 4 }}>PDF · DOCX · PNG · JPG · MP3 · MP4 · WAV · M4A</div>
           {file && (
-            <button onClick={e => { e.stopPropagation(); setFile(null); }} style={{ marginTop: 8, background: "none", border: "1px solid var(--line2)", borderRadius: 4, color: "var(--muted)", padding: "2px 10px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>
+            <button onClick={e => { e.stopPropagation(); setFile(null); setClassName(""); }} style={{ marginTop: 8, background: "none", border: "1px solid var(--line2)", borderRadius: 4, color: "var(--muted)", padding: "2px 10px", fontSize: 10, cursor: "pointer", fontFamily: "inherit" }}>
               remove
             </button>
           )}
         </div>
-        <input ref={inputRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.docx" style={{ display: "none" }} onChange={e => e.target.files?.[0] && setFile(e.target.files[0])} />
+        <input ref={inputRef} type="file" accept=".pdf,.png,.jpg,.jpeg,.webp,.docx,.mp3,.mp4,.wav,.m4a,.webm,.ogg,.flac,.mov,.mkv" style={{ display: "none" }} onChange={e => { const f = e.target.files?.[0]; if (f) pickFile(f); }} />
 
         {/* class */}
         <div>
-          <div style={{ fontSize: 9, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 6 }}>Class / subject</div>
+          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
+            <span style={{ fontSize: 9, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted)" }}>Class / subject</span>
+            {suggesting && <span style={{ fontSize: 9, color: "var(--accent)", animation: "pulse 1s infinite" }}>suggesting…</span>}
+          </div>
           <input
             value={className}
             onChange={e => setClassName(e.target.value)}
@@ -1010,16 +1109,17 @@ function UploadView({ files, onRefresh, onViewFile }: { files: FileEntry[]; onRe
             placeholder="e.g. Biology 101"
             list="class-list"
             style={{
-              width: "100%", background: "var(--panel2)", border: "1px solid var(--line2)",
+              width: "100%", background: "var(--panel2)", border: `1px solid ${suggesting ? "var(--accent)" : "var(--line2)"}`,
               borderRadius: "var(--radius-sm)", padding: "8px 10px", color: "var(--text)",
-              fontFamily: "inherit", fontSize: 12, outline: "none",
-              caretColor: "var(--accent)", transition: "border-color 0.15s",
+              fontFamily: "inherit", fontSize: 12, outline: "none", caretColor: "var(--accent)", transition: "border-color 0.15s",
             }}
             onFocus={e => e.target.style.borderColor = "var(--accent)"}
-            onBlur={e => e.target.style.borderColor = "var(--line2)"}
+            onBlur={e => { if (!suggesting) e.target.style.borderColor = "var(--line2)"; }}
           />
           <datalist id="class-list">{Object.keys(grouped).map(c => <option key={c} value={c} />)}</datalist>
         </div>
+
+        <TagInput tags={tags} onChange={setTags} allTags={allTags} />
 
         <button onClick={submit} disabled={loading || !file || !className.trim()} style={{
           padding: "9px 0", borderRadius: "var(--radius-sm)", fontFamily: "inherit", fontSize: 12, cursor: "pointer",
@@ -1027,23 +1127,36 @@ function UploadView({ files, onRefresh, onViewFile }: { files: FileEntry[]; onRe
           border: "none", color: loading || !file || !className.trim() ? "var(--muted)" : "#fff",
           transition: "all 0.15s", fontWeight: 500,
         }}>
-          {loading ? "Ingesting…" : "Ingest file"}
+          {loading ? (isAudio(file?.name ?? "") ? "Transcribing…" : "Ingesting…") : "Ingest file"}
         </button>
 
         {error && <div style={{ color: "var(--red)", fontSize: 11, padding: "8px 10px", background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: "var(--radius-sm)" }}>{error}</div>}
-        {status && <div style={{ color: "var(--green)", fontSize: 11, padding: "8px 10px", background: "rgba(52,211,153,0.08)", border: "1px solid rgba(52,211,153,0.2)", borderRadius: "var(--radius-sm)" }}>{status}</div>}
+        {status && <div style={{ color: loading ? "var(--amber)" : "var(--green)", fontSize: 11, padding: "8px 10px", background: loading ? "rgba(251,191,36,0.08)" : "rgba(52,211,153,0.08)", border: `1px solid ${loading ? "rgba(251,191,36,0.2)" : "rgba(52,211,153,0.2)"}`, borderRadius: "var(--radius-sm)" }}>{status}</div>}
       </div>
 
       {/* right: library */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
-        <div style={{ padding: "12px 16px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 8, flexShrink: 0 }}>
+        <div style={{ padding: "10px 16px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 8, flexShrink: 0, flexWrap: "wrap" }}>
           <span style={{ fontSize: 11, color: "var(--text2)", fontWeight: 500 }}>Library</span>
           <span style={{ fontSize: 10, color: "var(--muted)" }}>{files.length} files</span>
+          {/* tag filter pills */}
+          {allTags.length > 0 && (
+            <div style={{ display: "flex", gap: 4, flexWrap: "wrap", flex: 1 }}>
+              {allTags.map(t => (
+                <button key={t} onClick={() => setTagFilter(tagFilter === t ? null : t)} style={{
+                  padding: "2px 8px", borderRadius: 20, fontSize: 10, cursor: "pointer", fontFamily: "inherit",
+                  background: tagFilter === t ? "var(--accent-bg)" : "transparent",
+                  border: `1px solid ${tagFilter === t ? "var(--accent)" : "var(--line2)"}`,
+                  color: tagFilter === t ? "var(--accent)" : "var(--muted)", transition: "all 0.1s",
+                }}>#{t}</button>
+              ))}
+            </div>
+          )}
           <input value={search} onChange={e => setSearch(e.target.value)} placeholder="Search…"
             style={{
               marginLeft: "auto", background: "var(--panel2)", border: "1px solid var(--line2)",
               borderRadius: 20, color: "var(--text)", padding: "4px 12px", fontSize: 11,
-              fontFamily: "inherit", outline: "none", width: 160,
+              fontFamily: "inherit", outline: "none", width: 140,
             }} />
         </div>
         <div style={{ flex: 1, overflow: "auto", padding: "12px 16px" }}>
@@ -1053,11 +1166,12 @@ function UploadView({ files, onRefresh, onViewFile }: { files: FileEntry[]; onRe
               No files yet. Upload something to get started.
             </div>
           )}
-
           {filtered ? (
             <div>
-              <div style={{ fontSize: 9, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 10 }}>{filtered.length} result{filtered.length !== 1 ? "s" : ""}</div>
-              {filtered.map(f => <FileRow key={f.filename} f={f} deleting={deleting} onDelete={deleteFile} onView={onViewFile} />)}
+              <div style={{ fontSize: 9, letterSpacing: "0.15em", textTransform: "uppercase", color: "var(--muted)", marginBottom: 10 }}>
+                {filtered.length} result{filtered.length !== 1 ? "s" : ""}{tagFilter ? ` · #${tagFilter}` : ""}
+              </div>
+              {filtered.map(f => <FileRow key={f.filename} f={f} deleting={deleting} onDelete={deleteFile} onView={onViewFile} onRefresh={onRefresh} />)}
             </div>
           ) : (
             Object.entries(grouped).sort(([a], [b]) => a.localeCompare(b)).map(([cls, clsFiles]) => (
@@ -1076,7 +1190,7 @@ function UploadView({ files, onRefresh, onViewFile }: { files: FileEntry[]; onRe
                 </button>
                 {expanded.has(cls) && (
                   <div style={{ paddingLeft: 12, borderLeft: "1px solid var(--line2)", marginLeft: 6, marginBottom: 4 }}>
-                    {clsFiles.map(f => <FileRow key={f.filename} f={f} deleting={deleting} onDelete={deleteFile} onView={onViewFile} />)}
+                    {clsFiles.map(f => <FileRow key={f.filename} f={f} deleting={deleting} onDelete={deleteFile} onView={onViewFile} onRefresh={onRefresh} />)}
                   </div>
                 )}
               </div>
@@ -1088,37 +1202,68 @@ function UploadView({ files, onRefresh, onViewFile }: { files: FileEntry[]; onRe
   );
 }
 
-function FileRow({ f, deleting, onDelete, onView }: { f: FileEntry; deleting: string | null; onDelete: (n: string) => void; onView: (n: string) => void }) {
+function FileRow({ f, deleting, onDelete, onView, onRefresh }: { f: FileEntry; deleting: string | null; onDelete: (n: string) => void; onView: (n: string) => void; onRefresh: () => void }) {
   const [hov, setHov] = useState(false);
-  const ext = f.filename.split(".").pop()?.toUpperCase() ?? "FILE";
+  const [editingTags, setEditingTags] = useState(false);
+  const [localTags, setLocalTags] = useState(f.tags ?? []);
+  const icon = fileIcon(f);
+  const isAudioFile = f.file_type === "audio" || isAudio(f.filename);
+
+  async function saveTags(newTags: string[]) {
+    setLocalTags(newTags);
+    await fetch(`/api/files/${encodeURIComponent(f.filename)}/tags`, {
+      method: "PUT", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ tags: newTags }),
+    }).catch(() => {});
+    onRefresh();
+  }
+
   return (
     <div
       onMouseEnter={() => setHov(true)} onMouseLeave={() => setHov(false)}
-      onClick={() => onView(f.filename)}
-      style={{
-        display: "flex", alignItems: "center", gap: 8, padding: "7px 8px",
-        borderRadius: "var(--radius-sm)", background: hov ? "var(--panel2)" : "transparent",
-        marginBottom: 2, cursor: "pointer", transition: "background 0.1s",
-      }}>
-      <div style={{
-        width: 28, height: 28, borderRadius: 4, flexShrink: 0,
-        background: "var(--line)", display: "flex", alignItems: "center", justifyContent: "center",
-        fontSize: 8, fontWeight: 700, color: "var(--accent)", letterSpacing: "0.05em",
-      }}>{ext}</div>
-      <div style={{ flex: 1, minWidth: 0 }}>
-        <div style={{ color: "var(--text)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.filename}</div>
-        <div style={{ color: "var(--muted)", fontSize: 10 }}>{f.ingested_at.slice(0, 10)}</div>
+      style={{ marginBottom: 2, borderRadius: "var(--radius-sm)", background: hov ? "var(--panel2)" : "transparent", transition: "background 0.1s" }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 8px", cursor: "pointer" }} onClick={() => onView(f.filename)}>
+        <div style={{
+          width: 28, height: 28, borderRadius: 4, flexShrink: 0,
+          background: isAudioFile ? "rgba(167,139,250,0.15)" : "var(--line)",
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: isAudioFile ? 13 : 8, fontWeight: 700,
+          color: isAudioFile ? "var(--accent)" : "var(--accent)", letterSpacing: "0.05em",
+        }}>{icon}</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ color: "var(--text)", fontSize: 11, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{f.filename}</div>
+          <div style={{ display: "flex", gap: 6, alignItems: "center", marginTop: 2, flexWrap: "wrap" }}>
+            <span style={{ color: "var(--muted)", fontSize: 9 }}>{f.ingested_at.slice(0, 10)}</span>
+            {localTags.map(t => (
+              <span key={t} style={{ fontSize: 9, color: "var(--accent)", opacity: 0.7 }}>#{t}</span>
+            ))}
+          </div>
+        </div>
+        {hov && (
+          <div style={{ display: "flex", gap: 4, flexShrink: 0 }}>
+            <button onClick={e => { e.stopPropagation(); setEditingTags(v => !v); }} style={{
+              background: "none", border: "1px solid var(--line2)", borderRadius: 4, color: "var(--muted)",
+              fontSize: 10, padding: "2px 6px", cursor: "pointer", fontFamily: "inherit",
+            }}
+              onMouseEnter={e => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.borderColor = "var(--accent)"; }}
+              onMouseLeave={e => { e.currentTarget.style.color = "var(--muted)"; e.currentTarget.style.borderColor = "var(--line2)"; }}>
+              tags
+            </button>
+            <button onClick={e => { e.stopPropagation(); onDelete(f.filename); }} disabled={deleting === f.filename} style={{
+              background: "none", border: "1px solid var(--line2)", borderRadius: 4, color: "var(--red)",
+              fontSize: 10, padding: "2px 6px", cursor: "pointer", fontFamily: "inherit",
+            }}
+              onMouseEnter={e => e.currentTarget.style.borderColor = "var(--red)"}
+              onMouseLeave={e => e.currentTarget.style.borderColor = "var(--line2)"}>
+              {deleting === f.filename ? "…" : "×"}
+            </button>
+          </div>
+        )}
       </div>
-      {hov && (
-        <button onClick={e => { e.stopPropagation(); onDelete(f.filename); }} disabled={deleting === f.filename} style={{
-          background: "none", border: "1px solid var(--line2)", borderRadius: 4, color: "var(--red)",
-          fontSize: 10, padding: "2px 8px", cursor: "pointer", fontFamily: "inherit", flexShrink: 0,
-          transition: "all 0.1s",
-        }}
-          onMouseEnter={e => e.currentTarget.style.borderColor = "var(--red)"}
-          onMouseLeave={e => e.currentTarget.style.borderColor = "var(--line2)"}>
-          {deleting === f.filename ? "…" : "delete"}
-        </button>
+      {editingTags && (
+        <div style={{ padding: "4px 8px 10px 44px" }} onClick={e => e.stopPropagation()}>
+          <TagInput tags={localTags} onChange={saveTags} allTags={[]} />
+        </div>
       )}
     </div>
   );
