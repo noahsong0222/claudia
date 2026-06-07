@@ -7,7 +7,7 @@ from langchain_core.messages import HumanMessage, SystemMessage
 DB_DIR = Path(__file__).parent / "db"
 EMBED_MODEL = "nomic-embed-text"
 CHAT_MODEL = "llama3.2"
-N_RESULTS = 5
+N_RESULTS = 6
 
 _client = chromadb.PersistentClient(path=str(DB_DIR))
 _collection = _client.get_or_create_collection("claudia")
@@ -22,20 +22,31 @@ _SYSTEM = (
 )
 
 
-def search(query: str, n: int = N_RESULTS, class_name: str | None = None) -> list[dict]:
-    vector = _embeddings.embed_query(query)
+def _build_where(class_name: str | None, filename: str | None) -> dict | None:
+    if filename:
+        return {"filename": filename}
+    if class_name:
+        return {"class_name": class_name}
+    return None
+
+
+def search(
+    query: str,
+    n: int = N_RESULTS,
+    class_name: str | None = None,
+    filename: str | None = None,
+) -> list[dict]:
     total = _collection.count()
     if total == 0:
         return []
-
-    where = {"class_name": class_name} if class_name else None
+    vector = _embeddings.embed_query(query)
+    where = _build_where(class_name, filename)
     results = _collection.query(
         query_embeddings=[vector],
         n_results=min(n, total),
         where=where,
         include=["documents", "metadatas", "distances"],
     )
-
     return [
         {"text": doc, "metadata": meta, "distance": dist}
         for doc, meta, dist in zip(
@@ -46,21 +57,29 @@ def search(query: str, n: int = N_RESULTS, class_name: str | None = None) -> lis
     ]
 
 
-def ask(question: str, class_name: str | None = None) -> dict:
-    chunks = search(question, class_name=class_name)
+def get_all_chunks(class_name: str | None = None, filename: str | None = None) -> list[str]:
+    """Return all document text chunks for a given scope (for summary/flashcard)."""
+    total = _collection.count()
+    if total == 0:
+        return []
+    where = _build_where(class_name, filename)
+    result = _collection.get(where=where, include=["documents"])
+    return result["documents"]
+
+
+def ask(question: str, class_name: str | None = None, filename: str | None = None) -> dict:
+    chunks = search(question, class_name=class_name, filename=filename)
     if not chunks:
         return {"answer": "No documents have been ingested yet.", "sources": []}
 
     context = "\n\n---\n\n".join(
-        f"[{c['metadata']['filename']} | {c['metadata']['class_name']}]\n{c['text']}"
+        f"[{c['metadata']['filename']} | {c['metadata'].get('class_name', 'General')}]\n{c['text']}"
         for c in chunks
     )
-
     messages = [
         SystemMessage(content=_SYSTEM),
         HumanMessage(content=f"Context:\n{context}\n\nQuestion: {question}"),
     ]
-
     response = _llm.invoke(messages)
     return {"answer": response.content, "sources": [c["metadata"] for c in chunks]}
 
@@ -70,12 +89,5 @@ if __name__ == "__main__":
     if len(sys.argv) < 2:
         print('Usage: python rag.py "your question" [class_name]')
         sys.exit(1)
-    class_arg = sys.argv[2] if len(sys.argv) > 2 else None
-    result = ask(" ".join(sys.argv[1:]), class_name=class_arg)
+    result = ask(" ".join(sys.argv[1:]))
     print("\nAnswer:\n", result["answer"])
-    print("\nSources:")
-    seen = set()
-    for s in result["sources"]:
-        if s["filename"] not in seen:
-            seen.add(s["filename"])
-            print(f"  • {s['filename']} ({s['class_name']})")

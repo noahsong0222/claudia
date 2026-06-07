@@ -1,15 +1,25 @@
 @import "tailwindcss";
 
 :root {
-  --bg:     #08070d;
-  --panel:  #0d0b14;
-  --line:   #17132a;
-  --line2:  #1e1a30;
-  --text:   #ccc8e8;
-  --muted:  #524d6e;
-  --amber:  #a78bfa;
-  --green:  #7dd3fc;
-  --red:    #f87171;
+  --bg:       #0a0a0f;
+  --panel:    #0f0f17;
+  --panel2:   #13131e;
+  --line:     #1a1a2e;
+  --line2:    #232338;
+  --text:     #e2e0f0;
+  --text2:    #a8a5c0;
+  --muted:    #4a4768;
+  --accent:   #a78bfa;
+  --accent2:  #7c3aed;
+  --accent-bg: rgba(167,139,250,0.08);
+  --green:    #34d399;
+  --blue:     #60a5fa;
+  --red:      #f87171;
+  --amber:    #fbbf24;
+  --user-bg:  #1a1a2e;
+  --ai-bg:    transparent;
+  --radius:   10px;
+  --radius-sm: 6px;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -25,10 +35,52 @@ html, body {
 }
 
 /* scrollbar */
-::-webkit-scrollbar { width: 4px; }
+::-webkit-scrollbar { width: 3px; height: 3px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--line2); border-radius: 2px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
 
 /* selection */
-::selection { background: rgba(167, 139, 250, 0.25); }
+::selection { background: rgba(167,139,250,0.2); }
+
+/* markdown-like prose in messages */
+.prose { line-height: 1.8; color: var(--text); }
+.prose p { margin-bottom: 10px; }
+.prose p:last-child { margin-bottom: 0; }
+.prose ul, .prose ol { margin: 8px 0 8px 18px; }
+.prose li { margin-bottom: 3px; }
+.prose code { background: var(--line2); border-radius: 3px; padding: 1px 5px; font-size: 12px; color: var(--accent); }
+.prose pre { background: var(--line); border: 1px solid var(--line2); border-radius: var(--radius-sm); padding: 12px; overflow-x: auto; margin: 10px 0; }
+.prose pre code { background: none; padding: 0; color: var(--text2); }
+.prose h1, .prose h2, .prose h3 { color: var(--text); margin: 14px 0 6px; font-weight: 600; }
+.prose h1 { font-size: 15px; }
+.prose h2 { font-size: 14px; }
+.prose h3 { font-size: 13px; }
+.prose strong { color: var(--text); font-weight: 600; }
+.prose em { color: var(--text2); }
+.prose blockquote { border-left: 2px solid var(--accent); padding-left: 12px; color: var(--text2); margin: 8px 0; }
+.prose hr { border: none; border-top: 1px solid var(--line2); margin: 12px 0; }
+
+@keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+@keyframes fadeIn { from{opacity:0;transform:translateY(4px)} to{opacity:1;transform:translateY(0)} }
+@keyframes slideRight { from{transform:translateX(20px);opacity:0} to{transform:translateX(0);opacity:1} }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
+
+/* flashcard 3D flip */
+.card-scene { perspective: 900px; width: 100%; }
+.card-inner {
+  position: relative; width: 100%; transition: transform 0.42s cubic-bezier(.4,0,.2,1);
+  transform-style: preserve-3d;
+}
+.card-inner.flipped { transform: rotateY(180deg); }
+.card-face {
+  backface-visibility: hidden; -webkit-backface-visibility: hidden;
+  border-radius: var(--radius); padding: 20px; min-height: 120px;
+  display: flex; flex-direction: column; justify-content: center;
+}
+.card-front { background: var(--panel2); border: 1px solid var(--line2); position: relative; }
+.card-back  { background: var(--panel2); border: 1px solid var(--accent);
+  position: absolute; top:0; left:0; right:0; bottom:0;
+  transform: rotateY(180deg);
+  box-shadow: 0 0 0 1px var(--accent2), 0 4px 20px rgba(124,58,237,0.15);
+}
