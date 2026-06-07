@@ -1,59 +1,94 @@
 # Claudia
 
-A local AI second brain. Upload your PDFs, images, and notes — then chat with them, generate flashcards, get summaries, and quiz yourself. Everything runs on your machine. Nothing goes to the cloud.
+A local AI second brain. Upload your PDFs, images, notes, and lecture recordings — then chat with them, generate flashcards, get summaries, and quiz yourself. Everything runs on your machine. Nothing goes to the cloud.
 
-**Stack:** Ollama (llama3.2 + nomic-embed-text) · ChromaDB · FastAPI · Next.js
+**Stack:** Ollama (llama3.2 + nomic-embed-text) · ChromaDB · faster-whisper · FastAPI · Next.js
 
 ---
 
-## Requirements
+## Get started
 
-- [Ollama](https://ollama.ai) running locally
-- Python 3.10+
-- Node.js 18+
+### 1. Clone
 
-Pull the models first:
+```bash
+git clone https://github.com/noahsong0222/claudia.git
+cd claudia
+```
+
+### 2. Install prerequisites
+
+You need three things on your machine first:
+
+| Tool | Why | Install |
+|---|---|---|
+| [Ollama](https://ollama.ai) | Runs the LLM + embeddings locally | Download from ollama.ai |
+| Python 3.10+ | Backend | python.org or `brew install python` |
+| Node.js 18+ | Frontend | nodejs.org or `brew install node` |
+| Tesseract | OCR for scanned PDFs / images | `brew install tesseract` |
+| ffmpeg | Audio/video decoding for transcription | `brew install ffmpeg` |
+
+> On Linux use `apt install tesseract-ocr ffmpeg`. On Windows use the Tesseract and ffmpeg installers, or `winget install`.
+
+Pull the Ollama models (one-time, ~3 GB):
 
 ```bash
 ollama pull llama3.2
 ollama pull nomic-embed-text
 ```
 
----
-
-## Setup
-
-**Backend**
+### 3. Start the backend
 
 ```bash
-cd claudia
 python -m venv venv
-source venv/bin/activate
-pip install fastapi uvicorn chromadb langchain-ollama langchain-text-splitters \
-            langchain-core pypdf python-docx pillow pytesseract pymupdf numpy
-python api.py
-# → http://localhost:8000
+source venv/bin/activate          # Windows: venv\Scripts\activate
+pip install -r requirements.txt
+python api.py                     # → http://localhost:8000
 ```
 
-**Frontend**
+The first audio file you upload downloads the Whisper model (~150 MB) automatically.
+
+### 4. Start the frontend
+
+In a second terminal:
 
 ```bash
 cd web
 npm install
-npm run dev
-# → http://localhost:3000
+npm run dev                       # → http://localhost:3000
 ```
 
-Open `http://localhost:3000`.
+Open **http://localhost:3000** and you're in.
 
 ---
 
-## How it works
+## How it works (RAG)
 
-1. **Upload** a PDF, image, or DOCX in the Library tab — tag it with a class name (e.g. "Biology 101")
-2. Claudia chunks and embeds it into a local ChromaDB vector database
-3. **Chat** — every question runs RAG: your query is embedded, the top matching chunks are retrieved, and llama3.2 answers using only your documents as context
-4. Source chips appear under each answer so you can click through to the original file
+1. **Upload** a file in the Library tab. Claudia auto-suggests a class name from the filename — accept it or type your own.
+2. The file is extracted to text (PDF text, OCR for images, Whisper for audio/video), chunked, and embedded into a local **ChromaDB** vector database.
+3. **Chat** — every question runs retrieval-augmented generation: your query is embedded, the top matching chunks are pulled from ChromaDB, and **llama3.2** answers using only your documents as context.
+4. Source chips appear under each answer so you can click straight through to the original file.
+
+No document text ever leaves your machine.
+
+---
+
+## Supported file types
+
+| Type | Formats | How it's read |
+|---|---|---|
+| Documents | `.pdf` `.docx` | Direct text extraction (OCR fallback for scanned PDFs) |
+| Images | `.png` `.jpg` `.jpeg` `.webp` | Tesseract OCR |
+| Audio / video | `.mp3` `.mp4` `.wav` `.m4a` `.webm` `.ogg` `.flac` `.mov` `.mkv` | faster-whisper transcription (fully local) |
+
+---
+
+## Tags & auto-tagging
+
+- **Auto-class** — drop a file and Claudia guesses its class from the filename via the LLM, so you rarely type it yourself.
+- **Tags** — add free-form tags (chips) at upload time, or edit them later by hovering a file in the Library and clicking **tags**.
+- **Filter** — click any `#tag` pill at the top of the Library to filter to just those files.
+
+Tags are stored in ChromaDB metadata and searchable from the Library search box.
 
 ---
 
@@ -68,7 +103,7 @@ Open `http://localhost:3000`.
 | `/explain <topic>` | Deep-dive explanation using your notes |
 | `/search <query>` | Semantic search with relevance scores |
 | `/note <text>` | Save a quick note directly to the brain |
-| `/stats` | Per-class breakdown of files and chunks |
+| `/stats` | Per-class breakdown of files, chunks, and tags |
 | `/clear` | Start a new conversation |
 
 All commands are **case-insensitive** and support aliases (`/flash`, `/sum`, `/define`, `/find`, `/jot`, etc.).
@@ -87,7 +122,7 @@ Scope any command to a class or file using the **◎ scope picker** in the top-r
 
 - **Conversation history** — chats auto-save to localStorage; restore any past conversation from the sidebar
 - **MD export / import** — export a chat as `.md`, import it back later to continue
-- **File viewer** — click any file to preview PDFs inline, view images, or read DOCX text
+- **File viewer** — click any file to preview PDFs inline, view images, or read transcripts
 - **Knowledge graph** — force-directed D3 graph showing semantic connections between files
 - **Resizable sidebar** — drag the right edge to any width
 - **Docs tab** — full in-app reference for every command and feature
@@ -112,11 +147,12 @@ Scope any command to a class or file using the **◎ scope picker** in the top-r
 
 ```
 claudia/
-├── api.py          # FastAPI backend (all endpoints)
-├── ingest.py       # File ingestion: PDF, image (OCR), DOCX → ChromaDB
-├── rag.py          # Vector search + LLM pipeline
-├── db/             # ChromaDB persistent store
-├── uploads/        # Uploaded files served as static assets
+├── api.py            # FastAPI backend (all endpoints)
+├── ingest.py         # Ingestion: PDF, image (OCR), DOCX, audio (Whisper) → ChromaDB
+├── rag.py            # Vector search + LLM pipeline
+├── requirements.txt  # Python dependencies
+├── db/               # ChromaDB persistent store
+├── uploads/          # Uploaded files served as static assets
 └── web/
     └── app/
         ├── page.tsx              # Main UI (chat, library, graph, docs)
@@ -125,3 +161,12 @@ claudia/
             ├── Graph.tsx         # D3 knowledge graph
             └── FileViewer.tsx    # File preview panel
 ```
+
+---
+
+## Troubleshooting
+
+- **`ollama: connection refused`** — make sure Ollama is running (`ollama serve` or the desktop app).
+- **Audio upload hangs** — the first one downloads the Whisper model; give it a minute. Check `ffmpeg -version` works.
+- **Scanned PDF returns no text** — install Tesseract (`brew install tesseract`) so OCR fallback can run.
+- **Port already in use** — kill the stray process (`lsof -ti:3000 | xargs kill`) or change the port.

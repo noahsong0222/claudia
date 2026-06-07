@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+chromadb
+langchain-ollama
+langchain-text-splitters
+langchain-core
+pypdf
+python-docx
+pillow
+pytesseract
+pymupdf
+numpy
+faster-whisper
+python-multipart
