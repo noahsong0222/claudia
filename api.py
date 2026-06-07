@@ -14,7 +14,7 @@ from pydantic import BaseModel
 
 from ingest import (
     ingest_file, get_classes, get_files, get_all_tags, update_file_tags,
-    extract_preview, decode_tags, AUDIO_EXTS,
+    extract_preview, decode_tags, invalidate_cache, AUDIO_EXTS,
     _collection, _embeddings, _splitter,
 )
 from rag import search, get_all_chunks, _llm, _SYSTEM
@@ -139,6 +139,7 @@ def delete_file(filename: str):
     ids = results["ids"]
     if ids:
         _collection.delete(ids=ids)
+        invalidate_cache()
     upload_path = UPLOADS_DIR / filename
     if upload_path.exists():
         upload_path.unlink()
@@ -402,19 +403,14 @@ def stats():
     all_tags    = get_all_tags()
     total_chunks = _collection.count()
 
+    # chunk_count comes from the cached rollup — no second full scan needed.
     by_class: dict[str, dict] = {}
     for f in all_files:
         cn = f.get("class_name", "General")
         if cn not in by_class:
             by_class[cn] = {"files": 0, "chunks": 0}
         by_class[cn]["files"] += 1
-
-    if total_chunks > 0:
-        result = _collection.get(include=["metadatas"])
-        for meta in result["metadatas"]:
-            cn = meta.get("class_name", "General")
-            if cn in by_class:
-                by_class[cn]["chunks"] += 1
+        by_class[cn]["chunks"] += f.get("chunk_count", 0)
 
     audio_files = sum(1 for f in all_files if f.get("file_type") == "audio")
 
@@ -504,6 +500,7 @@ def note(req: NoteRequest):
         for i in range(len(chunks))
     ]
     _collection.add(ids=ids, embeddings=vectors, documents=chunks, metadatas=metadatas)
+    invalidate_cache()
     return {"title": title, "class_name": req.class_name, "tags": req.tags, "chunk_count": len(chunks)}
 
 

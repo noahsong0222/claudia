@@ -165,6 +165,7 @@ def ingest_file(
 
     _collection.add(ids=ids, embeddings=vectors, documents=chunks, metadatas=metadatas)
 
+    invalidate_cache()
     total = _collection.count()
     print(f"Done. {len(chunks)} chunks stored (total: {total}).")
     return {
@@ -189,42 +190,72 @@ def extract_preview(path: Path, max_chars: int = 1500) -> str:
         return ""
 
 
+# ── derived-data cache ───────────────────────────────────────────────────────
+# get_files / get_classes / get_all_tags / stats all need the same per-file
+# rollup of chunk metadata. Scanning the whole collection on every call is fine
+# at 20 chunks but O(n) and wasteful at tens of thousands. We compute the rollup
+# once, cache it, and invalidate on any write (ingest / delete / tag update /
+# note). Reads (the hot path, hit on every UI refresh) become O(1).
+
+_rollup_cache: dict | None = None
+
+
+def invalidate_cache() -> None:
+    """Drop the derived-data cache. Call after any write to the collection."""
+    global _rollup_cache
+    _rollup_cache = None
+
+
+def _rollup() -> dict:
+    """Build (or return cached) per-file rollup from one full metadata scan."""
+    global _rollup_cache
+    if _rollup_cache is not None:
+        return _rollup_cache
+
+    files: dict[str, dict] = {}
+    tags: set[str] = set()
+
+    if _collection.count() > 0:
+        all_meta = _collection.get(include=["metadatas"])["metadatas"]
+        for m in all_meta:
+            key = m["filename"]
+            f = files.get(key)
+            if f is None:
+                f = files[key] = {
+                    "filename":    key,
+                    "class_name":  m.get("class_name", "General"),
+                    "ingested_at": m.get("ingested_at", ""),
+                    "tags":        decode_tags(m.get("tags", "")),
+                    "file_type":   m.get("file_type", "document"),
+                    "chunk_count": 0,
+                }
+            f["chunk_count"] += 1
+            tags.update(f["tags"])
+
+    files_sorted = sorted(files.values(), key=lambda x: x["ingested_at"], reverse=True)
+    classes = sorted({f["class_name"] for f in files_sorted})
+
+    _rollup_cache = {
+        "files":   files_sorted,
+        "classes": classes,
+        "tags":    sorted(tags),
+    }
+    return _rollup_cache
+
+
 # ── queries ────────────────────────────────────────────────────────────────────
 
 def get_classes() -> list[str]:
-    if _collection.count() == 0:
-        return []
-    all_meta = _collection.get(include=["metadatas"])["metadatas"]
-    return sorted({m.get("class_name", "General") for m in all_meta})
+    return _rollup()["classes"]
 
 
 def get_all_tags() -> list[str]:
     """Return a sorted list of every tag used across all files."""
-    if _collection.count() == 0:
-        return []
-    all_meta = _collection.get(include=["metadatas"])["metadatas"]
-    tags: set[str] = set()
-    for m in all_meta:
-        tags.update(decode_tags(m.get("tags", "")))
-    return sorted(tags)
+    return _rollup()["tags"]
 
 
 def get_files() -> list[dict]:
-    if _collection.count() == 0:
-        return []
-    all_meta = _collection.get(include=["metadatas"])["metadatas"]
-    seen: dict[str, dict] = {}
-    for m in all_meta:
-        key = m["filename"]
-        if key not in seen:
-            seen[key] = {
-                "filename":    m["filename"],
-                "class_name":  m.get("class_name", "General"),
-                "ingested_at": m.get("ingested_at", ""),
-                "tags":        decode_tags(m.get("tags", "")),
-                "file_type":   m.get("file_type", "document"),
-            }
-    return sorted(seen.values(), key=lambda x: x["ingested_at"], reverse=True)
+    return _rollup()["files"]
 
 
 def update_file_tags(filename: str, tags: list[str]) -> int:
@@ -236,6 +267,7 @@ def update_file_tags(filename: str, tags: list[str]) -> int:
     tags_str = encode_tags(tags)
     updated_metas = [{**m, "tags": tags_str} for m in results["metadatas"]]
     _collection.update(ids=ids, metadatas=updated_metas)
+    invalidate_cache()
     return len(ids)
 
 
