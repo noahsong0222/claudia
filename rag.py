@@ -15,11 +15,26 @@ _embeddings = OllamaEmbeddings(model=EMBED_MODEL)
 _llm = ChatOllama(model=CHAT_MODEL)
 
 _SYSTEM = (
-    "You are Claudia, a personal AI second brain. "
-    "Answer the user's question using only the context excerpts provided. "
-    "If the answer isn't in the context, say so honestly. "
-    "Cite the filename(s) your answer comes from at the end."
+    "You are Claudia, a personal AI second brain that answers strictly from the "
+    "user's own notes.\n\n"
+    "RULES:\n"
+    "1. Use ONLY the information in the provided context excerpts. Do not use any "
+    "outside knowledge, even if you are confident you know the answer.\n"
+    "2. If the answer is not contained in the context, reply with exactly: "
+    "\"I couldn't find that in your notes.\" Then, if useful, suggest what the user "
+    "could upload or ask instead. Do NOT attempt to answer from general knowledge.\n"
+    "3. Never invent facts, names, dates, or numbers that are not in the context.\n"
+    "4. When you do answer, cite the filename(s) you used at the end, like: "
+    "Source: chapter3.pdf.\n"
+    "5. If only part of the question is covered, answer that part and clearly say "
+    "which part is not in the notes."
 )
+
+# Cosine-similarity floor (score = 1 - distance). If the best retrieved chunk
+# scores below this, the question is almost certainly not covered by the notes,
+# so we refuse before the LLM ever sees weak context and hallucinates from it.
+RELEVANCE_FLOOR = 0.25
+NOT_FOUND_MSG = "I couldn't find that in your notes."
 
 
 def _build_where(class_name: str | None, filename: str | None) -> dict | None:

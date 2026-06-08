@@ -17,7 +17,7 @@ from ingest import (
     extract_preview, decode_tags, invalidate_cache, AUDIO_EXTS,
     _collection, _embeddings, _splitter,
 )
-from rag import search, get_all_chunks, _llm, _SYSTEM
+from rag import search, get_all_chunks, _llm, _SYSTEM, RELEVANCE_FLOOR, NOT_FOUND_MSG
 from langchain_core.messages import HumanMessage, SystemMessage
 
 app = FastAPI(title="Claudia API")
@@ -180,9 +180,12 @@ async def chat_stream(req: ChatRequest):
     chunks = search(req.question, class_name=req.class_name, filename=req.filename)
     sources = [c["metadata"] for c in chunks]
 
-    if not chunks:
+    # Relevance gate: if nothing retrieved, or the best match is too weak, refuse
+    # instead of feeding the LLM off-topic context it would hallucinate from.
+    best_score = max((1 - c["distance"] for c in chunks), default=0.0)
+    if not chunks or best_score < RELEVANCE_FLOOR:
         async def no_results():
-            yield f'data: {json.dumps({"token": "No relevant documents found in this scope."})}\n\n'
+            yield f'data: {json.dumps({"token": NOT_FOUND_MSG})}\n\n'
             yield f'data: {json.dumps({"done": True, "sources": []})}\n\n'
         return StreamingResponse(no_results(), media_type="text/event-stream")
 
