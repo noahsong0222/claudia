@@ -7,7 +7,8 @@ const FileViewer = dynamic(() => import("./components/FileViewer"), { ssr: false
 
 // ── types ──────────────────────────────────────────────────────────────────────
 interface FileEntry { filename: string; class_name: string; ingested_at: string; tags: string[]; file_type?: string; }
-interface Source { filename: string; class_name: string; chunk_index: number; }
+interface Source { filename: string; class_name: string; chunk_index: number; score?: number; text?: string; }
+interface Confidence { score: number; label: "High" | "Medium" | "Low"; strong_sources?: number; note: string; }
 interface Flashcard { q: string; a: string; }
 interface QuizQuestion { q: string; options: string[]; answer: string; explanation: string; }
 interface SearchResult { text: string; filename: string; class_name: string; score: number; }
@@ -15,6 +16,7 @@ interface Message {
   role: "user" | "assistant" | "system";
   content: string;
   sources?: Source[];
+  confidence?: Confidence | null;
   streaming?: boolean;
   cards?: Flashcard[];
   quiz?: QuizQuestion[];
@@ -505,6 +507,86 @@ function CommandPalette({ query, onSelect, onClose }: {
   );
 }
 
+// ── show your work (sources + confidence) ──────────────────────────────────────
+function ShowYourWork({ sources, confidence, onViewFile }: {
+  sources: Source[]; confidence?: Confidence | null; onViewFile: (f: string) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const confColor = confidence?.label === "High" ? "var(--green)"
+    : confidence?.label === "Medium" ? "var(--amber)" : "var(--red)";
+  // unique files for the compact chip row
+  const files = [...new Map(sources.map(s => [s.filename, s])).values()];
+
+  return (
+    <div style={{ marginTop: 10 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+        {confidence && (
+          <span title={confidence.note} style={{
+            display: "inline-flex", alignItems: "center", gap: 5, fontSize: 10, fontWeight: 600,
+            color: confColor, border: `1px solid ${confColor}`, borderRadius: 20,
+            padding: "1px 9px", background: "transparent",
+          }}>
+            <span style={{ width: 6, height: 6, borderRadius: "50%", background: confColor }} />
+            {confidence.label} confidence · {Math.round(confidence.score * 100)}%
+          </span>
+        )}
+        {files.map((s, i) => (
+          <button key={i} onClick={() => onViewFile(s.filename)} style={{
+            fontSize: 10, color: "var(--muted)", border: "1px solid var(--line2)",
+            borderRadius: 20, padding: "1px 8px", background: "var(--panel)",
+            fontFamily: "inherit", cursor: "pointer", transition: "all 0.1s",
+          }}
+            onMouseEnter={e => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.borderColor = "var(--accent)"; }}
+            onMouseLeave={e => { e.currentTarget.style.color = "var(--muted)"; e.currentTarget.style.borderColor = "var(--line2)"; }}>
+            {s.filename}
+          </button>
+        ))}
+        <button onClick={() => setOpen(o => !o)} style={{
+          fontSize: 10, color: "var(--muted)", border: "1px dashed var(--line2)",
+          borderRadius: 20, padding: "1px 8px", background: "transparent",
+          fontFamily: "inherit", cursor: "pointer",
+        }}>
+          {open ? "hide work ▲" : "show work ▼"}
+        </button>
+      </div>
+
+      {confidence?.note && (
+        <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 5, fontStyle: "italic" }}>{confidence.note}</div>
+      )}
+
+      {open && (
+        <div style={{ marginTop: 8, display: "flex", flexDirection: "column", gap: 6 }}>
+          <div style={{ fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "var(--muted)" }}>
+            Retrieved passages — what the answer was built from
+          </div>
+          {sources.map((s, i) => {
+            const pct = Math.round((s.score ?? 0) * 100);
+            return (
+              <div key={i} style={{ border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "8px 10px", background: "var(--panel2)" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 5 }}>
+                  <button onClick={() => onViewFile(s.filename)} style={{
+                    fontSize: 10, color: "var(--accent)", background: "none", border: "none",
+                    padding: 0, cursor: "pointer", fontFamily: "inherit", fontWeight: 500,
+                  }}>{s.filename}</button>
+                  <span style={{ fontSize: 9, color: "var(--muted)" }}>#{s.chunk_index}</span>
+                  {/* relevance bar */}
+                  <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 6 }}>
+                    <div style={{ width: 60, height: 4, borderRadius: 2, background: "var(--line)", overflow: "hidden" }}>
+                      <div style={{ width: `${pct}%`, height: "100%", background: pct >= 60 ? "var(--green)" : pct >= 45 ? "var(--amber)" : "var(--red)" }} />
+                    </div>
+                    <span style={{ fontSize: 9, color: "var(--muted)", width: 28, textAlign: "right" }}>{pct}%</span>
+                  </div>
+                </div>
+                <div style={{ fontSize: 11, color: "var(--text2)", lineHeight: 1.5 }}>{s.text}</div>
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── message bubble ─────────────────────────────────────────────────────────────
 function MessageBubble({ msg, onViewFile }: { msg: Message; onViewFile: (f: string) => void }) {
   if (msg.role === "system") return (
@@ -553,19 +635,7 @@ function MessageBubble({ msg, onViewFile }: { msg: Message; onViewFile: (f: stri
           {msg.searchResults && <SearchResults results={msg.searchResults} />}
 
           {!msg.streaming && msg.sources && msg.sources.length > 0 && (
-            <div style={{ display: "flex", flexWrap: "wrap", gap: 4, marginTop: 10 }}>
-              {[...new Map(msg.sources.map(s => [s.filename, s])).values()].map((s, i) => (
-                <button key={i} onClick={() => onViewFile(s.filename)} style={{
-                  fontSize: 10, color: "var(--muted)", border: "1px solid var(--line2)",
-                  borderRadius: 20, padding: "1px 8px", background: "var(--panel)",
-                  fontFamily: "inherit", cursor: "pointer", transition: "all 0.1s",
-                }}
-                  onMouseEnter={e => { e.currentTarget.style.color = "var(--accent)"; e.currentTarget.style.borderColor = "var(--accent)"; }}
-                  onMouseLeave={e => { e.currentTarget.style.color = "var(--muted)"; e.currentTarget.style.borderColor = "var(--line2)"; }}>
-                  {s.filename}
-                </button>
-              ))}
-            </div>
+            <ShowYourWork sources={msg.sources} confidence={msg.confidence} onViewFile={onViewFile} />
           )}
         </div>
       </div>
@@ -759,7 +829,7 @@ function ChatView({ files, classes, onViewFile, convId, onConvSaved, onNewChat }
     try {
       await streamPost("chat/stream", { question: q, ...scopeArgs },
         t => { fullText += t; updateLast({ content: fullText, streaming: true }); },
-        d => updateLast({ content: fullText, streaming: false, sources: d.sources as Source[] }),
+        d => updateLast({ content: fullText, streaming: false, sources: d.sources as Source[], confidence: d.confidence as Confidence | null }),
       );
     } catch (err: unknown) {
       updateLast({ content: `Error: ${err instanceof Error ? err.message : "connection failed"}`, streaming: false });

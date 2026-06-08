@@ -178,7 +178,6 @@ async def chat_stream(req: ChatRequest):
         return StreamingResponse(empty(), media_type="text/event-stream")
 
     chunks = search(req.question, class_name=req.class_name, filename=req.filename)
-    sources = [c["metadata"] for c in chunks]
 
     # Relevance gate: if nothing retrieved, or the best match is too weak, refuse
     # instead of feeding the LLM off-topic context it would hallucinate from.
@@ -186,8 +185,22 @@ async def chat_stream(req: ChatRequest):
     if not chunks or best_score < RELEVANCE_FLOOR:
         async def no_results():
             yield f'data: {json.dumps({"token": NOT_FOUND_MSG})}\n\n'
-            yield f'data: {json.dumps({"done": True, "sources": []})}\n\n'
+            yield f'data: {json.dumps({"done": True, "sources": [], "confidence": None})}\n\n'
         return StreamingResponse(no_results(), media_type="text/event-stream")
+
+    # "Show your work": ship the exact retrieved chunks, their similarity scores,
+    # and an honest confidence estimate derived from those scores.
+    sources = [
+        {
+            "filename":    c["metadata"]["filename"],
+            "class_name":  c["metadata"].get("class_name", "General"),
+            "chunk_index": c["metadata"].get("chunk_index", 0),
+            "score":       round(1 - c["distance"], 3),
+            "text":        c["text"][:400] + ("…" if len(c["text"]) > 400 else ""),
+        }
+        for c in chunks
+    ]
+    confidence = _confidence_from_scores([s["score"] for s in sources])
 
     context = "\n\n---\n\n".join(
         f"[{c['metadata']['filename']} | {c['metadata'].get('class_name', 'General')}]\n{c['text']}"
@@ -202,10 +215,33 @@ async def chat_stream(req: ChatRequest):
         for chunk in _llm.stream(messages):
             if chunk.content:
                 yield f"data: {json.dumps({'token': chunk.content})}\n\n"
-        yield f"data: {json.dumps({'done': True, 'sources': sources})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'sources': sources, 'confidence': confidence})}\n\n"
 
     return StreamingResponse(token_stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+def _confidence_from_scores(scores: list[float]) -> dict:
+    """Honest confidence estimate from retrieval similarity scores.
+
+    best score drives the label; coverage (how many strong chunks) adds nuance.
+    Returned to the UI so every answer can show how well-grounded it is.
+    """
+    if not scores:
+        return {"score": 0.0, "label": "Low", "note": "No supporting notes found."}
+    best = max(scores)
+    strong = sum(1 for s in scores if s >= 0.45)
+    if best >= 0.6:
+        label = "High"
+    elif best >= 0.45:
+        label = "Medium"
+    else:
+        label = "Low"
+    if strong <= 1 or best < 0.5:
+        note = "Your notes are thin on this — double-check the answer."
+    else:
+        note = "Well supported by your notes."
+    return {"score": round(best, 2), "label": label, "strong_sources": strong, "note": note}
 
 
 # ── shared scope model ─────────────────────────────────────────────────────────
