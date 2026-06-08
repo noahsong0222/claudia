@@ -70,6 +70,15 @@ Open **http://localhost:3000** and you're in.
 
 No document text ever leaves your machine.
 
+### Grounding — answers come from your notes, not the model
+
+Claudia is built to **not make things up**. Two safeguards keep every answer tied to your documents:
+
+1. **Relevance gate** — before the model runs, Claudia checks how well your question matches anything in the library. If the best match is too weak (below a cosine-similarity floor of `0.25`), it skips the model entirely and replies *"I couldn't find that in your notes."* So asking an off-topic question can't pull in unrelated context.
+2. **Strict prompt** — when the model does answer, it's instructed to use *only* the retrieved excerpts, never outside knowledge, to cite the source filename, and to say plainly when something isn't covered.
+
+If Claudia refuses a question you know is in your notes, lower `RELEVANCE_FLOOR` in `rag.py`. If it answers things it shouldn't, raise it (toward `0.35`).
+
 ---
 
 ## Supported file types
