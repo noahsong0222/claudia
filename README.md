@@ -173,6 +173,20 @@ claudia/
 
 ---
 
+## Backup & restore
+
+Your data lives only on your machine — `db/` (the vector store) and `uploads/` (your files) are gitignored, so they're never pushed anywhere. Snapshot them anytime:
+
+```bash
+./backup.sh                 # → backups/claudia-backup-<timestamp>.tar.gz
+./restore.sh                # restore the most recent backup (asks first)
+./restore.sh path/to.tar.gz # restore a specific archive
+```
+
+`backup.sh` keeps the 10 most recent snapshots. `restore.sh` stashes your current state before overwriting, so a restore is always undoable. Conversations live in your browser's localStorage and are separate from these backups.
+
+---
+
 ## Troubleshooting
 
 - **`ollama: connection refused`** — make sure Ollama is running (`ollama serve` or the desktop app).

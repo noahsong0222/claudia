@@ -3,3 +3,4 @@ uploads/
 db/
 __pycache__/
 .env
+backups/
