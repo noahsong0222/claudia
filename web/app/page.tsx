@@ -12,6 +12,18 @@ interface Confidence { score: number; label: "High" | "Medium" | "Low"; strong_s
 interface Flashcard { q: string; a: string; }
 interface QuizQuestion { q: string; options: string[]; answer: string; explanation: string; }
 interface SearchResult { text: string; filename: string; class_name: string; score: number; }
+interface StyleSample { id: string; title: string; text: string; words: number; added_at: string; }
+interface StyleMetrics {
+  empty: boolean; samples?: number; total_words?: number; total_sentences?: number;
+  avg_sentence_length?: number; avg_word_length?: number; vocabulary_richness?: number;
+  avg_paragraph_sents?: number; punctuation_per_100?: Record<string, number>;
+  top_words?: { word: string; count: number }[];
+}
+interface StyleProfile {
+  voice_summary?: string; tone?: string; sentence_style?: string; vocabulary?: string;
+  punctuation?: string; structure?: string; signature_moves?: string[]; avoid?: string[];
+  metrics?: StyleMetrics; generated_at?: string; sample_count?: number; raw?: boolean;
+}
 interface Message {
   role: "user" | "assistant" | "system";
   content: string;
@@ -1609,6 +1621,224 @@ function ConvRow({ conv, active, onLoad, onDelete }: { conv: ConvMeta; active: b
   );
 }
 
+// ── style studio ───────────────────────────────────────────────────────────────
+function StatCard({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
+  return (
+    <div style={{ background: "var(--panel2)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "10px 12px" }}>
+      <div style={{ fontSize: 18, fontWeight: 600, color: "var(--text)" }}>{value}</div>
+      <div style={{ fontSize: 9, letterSpacing: "0.08em", textTransform: "uppercase", color: "var(--muted)", marginTop: 2 }}>{label}</div>
+      {hint && <div style={{ fontSize: 9, color: "var(--muted)", marginTop: 2, opacity: 0.7 }}>{hint}</div>}
+    </div>
+  );
+}
+
+function StyleView() {
+  const [samples, setSamples] = useState<StyleSample[]>([]);
+  const [metrics, setMetrics] = useState<StyleMetrics | null>(null);
+  const [profile, setProfile] = useState<StyleProfile | null>(null);
+  const [title, setTitle] = useState("");
+  const [text, setText] = useState("");
+  const [adding, setAdding] = useState(false);
+  const [analyzing, setAnalyzing] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  // generator
+  const [mode, setMode] = useState<"write" | "rewrite">("write");
+  const [task, setTask] = useState("");
+  const [output, setOutput] = useState("");
+  const [generating, setGenerating] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  async function refresh() {
+    const [s, m, p] = await Promise.all([
+      apiGet("style/samples"), apiGet("style/metrics"), apiGet("style/profile"),
+    ]);
+    setSamples(s.samples ?? []);
+    setMetrics(m ?? null);
+    setProfile(p.profile ?? null);
+  }
+  useEffect(() => { refresh(); }, []);
+
+  async function addSample() {
+    if (!text.trim()) { setErr("Paste some writing first."); return; }
+    setAdding(true); setErr(null);
+    const res = await fetch("/api/style/samples", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, text }),
+    });
+    if (res.ok) { setTitle(""); setText(""); await refresh(); }
+    else { const e = await res.json().catch(() => ({})); setErr(e.detail ?? "Failed to add"); }
+    setAdding(false);
+  }
+
+  async function removeSample(id: string) {
+    await fetch(`/api/style/samples/${id}`, { method: "DELETE" }).catch(() => {});
+    refresh();
+  }
+
+  async function analyze() {
+    setAnalyzing(true); setErr(null);
+    try {
+      const res = await fetch("/api/style/analyze", { method: "POST" });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.detail ?? "Analysis failed");
+      setProfile(data.profile);
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : "Analysis failed"); }
+    setAnalyzing(false);
+  }
+
+  async function generate() {
+    if (!task.trim()) return;
+    setGenerating(true); setOutput(""); setErr(null); setCopied(false);
+    let full = "";
+    try {
+      await streamPost("style/generate", { task, mode },
+        t => { full += t; setOutput(full); },
+        () => {},
+      );
+    } catch (e: unknown) { setErr(e instanceof Error ? e.message : "Generation failed"); }
+    setGenerating(false);
+  }
+
+  const totalWords = samples.reduce((a, s) => a + s.words, 0);
+  const enoughToAnalyze = totalWords >= 150;
+  const pp = metrics?.punctuation_per_100 ?? {};
+
+  return (
+    <div style={{ flex: 1, display: "flex", overflow: "hidden" }}>
+      {/* left: samples */}
+      <div style={{ width: 320, flexShrink: 0, borderRight: "1px solid var(--line)", padding: "18px 16px", display: "flex", flexDirection: "column", gap: 12, overflowY: "auto" }}>
+        <div>
+          <div style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>Your writing</div>
+          <div style={{ fontSize: 10, color: "var(--muted)", marginTop: 2 }}>
+            Paste essays, emails, anything you wrote. {totalWords} words so far
+            {!enoughToAnalyze && totalWords > 0 && <span style={{ color: "var(--amber)" }}> · add ~{150 - totalWords} more to analyze</span>}
+          </div>
+        </div>
+
+        <input value={title} onChange={e => setTitle(e.target.value)} placeholder="Title (optional)"
+          style={{ background: "var(--panel2)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "7px 10px", color: "var(--text)", fontFamily: "inherit", fontSize: 12, outline: "none" }} />
+        <textarea value={text} onChange={e => setText(e.target.value)} placeholder="Paste a writing sample…" rows={6}
+          style={{ background: "var(--panel2)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "8px 10px", color: "var(--text)", fontFamily: "inherit", fontSize: 12, outline: "none", resize: "vertical", lineHeight: 1.5 }} />
+        <button onClick={addSample} disabled={adding || !text.trim()} style={{
+          padding: "8px 0", borderRadius: "var(--radius-sm)", border: "none", fontFamily: "inherit", fontSize: 12, cursor: "pointer", fontWeight: 500,
+          background: adding || !text.trim() ? "var(--line)" : "var(--accent)", color: adding || !text.trim() ? "var(--muted)" : "#fff",
+        }}>{adding ? "Adding…" : "+ Add sample"}</button>
+
+        {err && <div style={{ color: "var(--red)", fontSize: 11 }}>{err}</div>}
+
+        <div style={{ borderTop: "1px solid var(--line)", paddingTop: 10, display: "flex", flexDirection: "column", gap: 6 }}>
+          {samples.length === 0 && <div style={{ fontSize: 11, color: "var(--muted)", textAlign: "center", padding: "10px 0" }}>No samples yet.</div>}
+          {samples.map(s => (
+            <div key={s.id} style={{ display: "flex", alignItems: "center", gap: 8, padding: "6px 8px", borderRadius: "var(--radius-sm)", background: "var(--panel2)" }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 11, color: "var(--text)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{s.title}</div>
+                <div style={{ fontSize: 9, color: "var(--muted)" }}>{s.words} words</div>
+              </div>
+              <button onClick={() => removeSample(s.id)} style={{ background: "none", border: "none", color: "var(--red)", cursor: "pointer", fontSize: 14, lineHeight: 1, padding: 0 }}>×</button>
+            </div>
+          ))}
+        </div>
+
+        {samples.length > 0 && (
+          <button onClick={analyze} disabled={analyzing || !enoughToAnalyze} title={!enoughToAnalyze ? "Add more writing first" : ""} style={{
+            padding: "9px 0", borderRadius: "var(--radius-sm)", border: "1px solid var(--accent)", fontFamily: "inherit", fontSize: 12, cursor: enoughToAnalyze ? "pointer" : "not-allowed", fontWeight: 500,
+            background: analyzing ? "var(--line)" : "var(--accent-bg)", color: "var(--accent)", opacity: enoughToAnalyze ? 1 : 0.5,
+          }}>{analyzing ? "Analyzing your voice…" : profile ? "Re-analyze my style" : "Analyze my style"}</button>
+        )}
+      </div>
+
+      {/* right: report + generator */}
+      <div style={{ flex: 1, overflow: "auto", padding: "20px 24px", display: "flex", flexDirection: "column", gap: 20 }}>
+        {/* analysis report */}
+        <div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)", marginBottom: 10 }}>Style fingerprint</div>
+          {!metrics || metrics.empty ? (
+            <div style={{ color: "var(--muted)", fontSize: 12, padding: "20px 0" }}>Add writing samples on the left to see your fingerprint.</div>
+          ) : (
+            <>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(120px, 1fr))", gap: 8, marginBottom: 12 }}>
+                <StatCard label="Avg sentence" value={`${metrics.avg_sentence_length}`} hint="words" />
+                <StatCard label="Avg word" value={`${metrics.avg_word_length}`} hint="chars" />
+                <StatCard label="Vocab richness" value={`${Math.round((metrics.vocabulary_richness ?? 0) * 100)}%`} hint="unique words" />
+                <StatCard label="Para length" value={`${metrics.avg_paragraph_sents}`} hint="sentences" />
+                <StatCard label="Words" value={metrics.total_words ?? 0} />
+                <StatCard label="Sentences" value={metrics.total_sentences ?? 0} />
+              </div>
+              <div style={{ display: "flex", gap: 14, flexWrap: "wrap", marginBottom: 12 }}>
+                <div style={{ fontSize: 10, color: "var(--muted)" }}>Punctuation per 100 words:</div>
+                {Object.entries(pp).map(([k, v]) => (
+                  <span key={k} style={{ fontSize: 10, color: "var(--text2)" }}>{k} <b style={{ color: "var(--accent)" }}>{v}</b></span>
+                ))}
+              </div>
+              {metrics.top_words && metrics.top_words.length > 0 && (
+                <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 12 }}>
+                  {metrics.top_words.map(w => (
+                    <span key={w.word} style={{ fontSize: 10, color: "var(--accent)", border: "1px solid var(--line2)", borderRadius: 20, padding: "1px 8px" }}>{w.word} ·{w.count}</span>
+                  ))}
+                </div>
+              )}
+
+              {profile ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8, marginTop: 4 }}>
+                  {profile.voice_summary && <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.6, fontStyle: "italic", borderLeft: "2px solid var(--accent)", paddingLeft: 10 }}>{profile.voice_summary}</div>}
+                  {([["tone", "Tone"], ["sentence_style", "Sentences"], ["vocabulary", "Vocabulary"], ["punctuation", "Punctuation"], ["structure", "Structure"]] as const).map(([k, lab]) =>
+                    profile[k] ? (
+                      <div key={k} style={{ fontSize: 12, color: "var(--text2)", lineHeight: 1.5 }}>
+                        <b style={{ color: "var(--text)" }}>{lab}:</b> {profile[k] as string}
+                      </div>
+                    ) : null
+                  )}
+                  {profile.signature_moves && profile.signature_moves.length > 0 && (
+                    <div style={{ fontSize: 12, color: "var(--text2)" }}><b style={{ color: "var(--text)" }}>Signature moves:</b>
+                      <ul style={{ margin: "4px 0 0", paddingLeft: 18 }}>{profile.signature_moves.map((m, i) => <li key={i} style={{ lineHeight: 1.5 }}>{m}</li>)}</ul>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <div style={{ fontSize: 11, color: "var(--muted)" }}>Click "Analyze my style" to get the qualitative voice profile.</div>
+              )}
+            </>
+          )}
+        </div>
+
+        {/* generator */}
+        <div style={{ borderTop: "1px solid var(--line)", paddingTop: 18 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 10 }}>
+            <div style={{ fontSize: 14, fontWeight: 600, color: "var(--text)" }}>Write in my voice</div>
+            <div style={{ display: "flex", gap: 2, marginLeft: "auto", background: "var(--panel2)", borderRadius: 20, padding: 2 }}>
+              {(["write", "rewrite"] as const).map(m => (
+                <button key={m} onClick={() => setMode(m)} style={{
+                  fontSize: 11, padding: "3px 12px", borderRadius: 20, border: "none", cursor: "pointer", fontFamily: "inherit",
+                  background: mode === m ? "var(--accent)" : "transparent", color: mode === m ? "#fff" : "var(--muted)",
+                }}>{m === "write" ? "Write" : "Rewrite"}</button>
+              ))}
+            </div>
+          </div>
+          <textarea value={task} onChange={e => setTask(e.target.value)}
+            placeholder={mode === "write" ? "What should I write? e.g. a cover letter for a research internship" : "Paste text to rewrite in your voice…"}
+            rows={3}
+            style={{ width: "100%", background: "var(--panel2)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "10px 12px", color: "var(--text)", fontFamily: "inherit", fontSize: 13, outline: "none", resize: "vertical", lineHeight: 1.5, boxSizing: "border-box" }} />
+          <button onClick={generate} disabled={generating || !task.trim()} style={{
+            marginTop: 8, padding: "8px 20px", borderRadius: "var(--radius-sm)", border: "none", fontFamily: "inherit", fontSize: 12, cursor: "pointer", fontWeight: 500,
+            background: generating || !task.trim() ? "var(--line)" : "var(--accent)", color: generating || !task.trim() ? "var(--muted)" : "#fff",
+          }}>{generating ? "Writing…" : mode === "write" ? "Write it" : "Rewrite it"}</button>
+
+          {output && (
+            <div style={{ marginTop: 14, background: "var(--panel2)", border: "1px solid var(--line2)", borderRadius: "var(--radius)", padding: "14px 16px", position: "relative" }}>
+              <button onClick={() => { navigator.clipboard.writeText(output); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+                style={{ position: "absolute", top: 10, right: 10, fontSize: 10, background: "var(--panel)", border: "1px solid var(--line2)", borderRadius: 6, color: "var(--muted)", padding: "2px 8px", cursor: "pointer", fontFamily: "inherit" }}>
+                {copied ? "copied ✓" : "copy"}
+              </button>
+              <div style={{ fontSize: 13, color: "var(--text)", lineHeight: 1.65, whiteSpace: "pre-wrap" }}>{output}{generating && <Cursor />}</div>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ── resizable sidebar ──────────────────────────────────────────────────────────
 function Sidebar({ view, setView, files, classes, chunkCount, onViewFile, width, onResize, conversations, activeConvId, onLoadConv, onDeleteConv, onNewChat }: {
   view: string; setView: (v: string) => void;
@@ -1650,6 +1880,7 @@ function Sidebar({ view, setView, files, classes, chunkCount, onViewFile, width,
   const navItems = [
     { id: "chat",   label: "Chat",    icon: "◎" },
     { id: "upload", label: "Library", icon: "↑" },
+    { id: "style",  label: "Style",   icon: "✶" },
     { id: "graph",  label: "Graph",   icon: "⟐" },
     { id: "docs",   label: "Docs",    icon: "?" },
   ];
@@ -1822,6 +2053,7 @@ export default function App() {
           />
         )}
         {view === "upload" && <UploadView files={files} onRefresh={refresh} onViewFile={setViewingFile} />}
+        {view === "style"  && <StyleView />}
         {view === "graph"  && <Graph />}
         {view === "docs"   && <DocsView />}
       </div>

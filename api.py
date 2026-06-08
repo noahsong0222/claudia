@@ -18,6 +18,7 @@ from ingest import (
     _collection, _embeddings, _splitter,
 )
 from rag import search, get_all_chunks, _llm, _SYSTEM, RELEVANCE_FLOOR, NOT_FOUND_MSG
+import style as style_studio
 from langchain_core.messages import HumanMessage, SystemMessage
 
 app = FastAPI(title="Claudia API")
@@ -601,6 +602,77 @@ def graph():
     class_edges = [{"source": fn, "target": file_meta[fn]["class_name"], "weight": 0.5} for fn in filenames]
 
     return {"nodes": file_nodes + class_nodes, "edges": edges + class_edges}
+
+
+# ── Style Studio ───────────────────────────────────────────────────────────────
+# Analyze the user's writing and generate text in their voice. Fully separate
+# from the notes RAG — samples + profile live in style/*.json.
+
+class StyleSample(BaseModel):
+    title: str = ""
+    text: str
+
+
+class StyleGenRequest(BaseModel):
+    task: str
+    mode: str = "write"   # "write" | "rewrite"
+
+
+@app.get("/style/samples")
+def style_samples():
+    return {"samples": style_studio.list_samples()}
+
+
+@app.post("/style/samples")
+def style_add_sample(req: StyleSample):
+    try:
+        return style_studio.add_sample(req.title, req.text)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.delete("/style/samples/{sample_id}")
+def style_delete_sample(sample_id: str):
+    if not style_studio.delete_sample(sample_id):
+        raise HTTPException(status_code=404, detail="Sample not found")
+    return {"deleted": sample_id}
+
+
+@app.get("/style/metrics")
+def style_metrics():
+    return style_studio.compute_metrics()
+
+
+@app.get("/style/profile")
+def style_profile():
+    return {"profile": style_studio.get_profile()}
+
+
+@app.post("/style/analyze")
+def style_analyze():
+    try:
+        return {"profile": style_studio.build_profile(_llm)}
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.post("/style/generate")
+async def style_generate(req: StyleGenRequest):
+    if not req.task.strip():
+        raise HTTPException(status_code=400, detail="Nothing to write.")
+    if not style_studio.list_samples():
+        raise HTTPException(status_code=400, detail="Add writing samples first so I can learn your voice.")
+
+    messages = style_studio.build_generation_messages(req.task, req.mode)
+
+    async def stream():
+        for chunk in _llm.stream(messages):
+            if chunk.content:
+                yield f"data: {json.dumps({'token': chunk.content})}\n\n"
+        yield f"data: {json.dumps({'done': True})}\n\n"
+
+    return StreamingResponse(stream(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
 if __name__ == "__main__":
