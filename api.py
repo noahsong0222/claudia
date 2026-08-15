@@ -669,7 +669,7 @@ OLLAMA_DOWN_MSG = "Can't reach Ollama — open the Ollama app (or run 'ollama se
 @app.post("/style/analyze")
 def style_analyze():
     try:
-        return {"profile": style_studio.build_profile(_llm)}
+        return {"profile": style_studio.build_profile(style_studio.get_style_llm())}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
@@ -688,10 +688,11 @@ async def style_generate(req: StyleGenRequest):
         raise HTTPException(status_code=400, detail="Add writing samples first so I can learn your voice.")
 
     messages = style_studio.build_generation_messages(req.task, req.mode)
+    style_llm = style_studio.get_style_llm()
 
     async def stream():
         try:
-            for chunk in _llm.stream(messages):
+            for chunk in style_llm.stream(messages):
                 if chunk.content:
                     yield f"data: {json.dumps({'token': chunk.content})}\n\n"
         except Exception:

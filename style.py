@@ -118,6 +118,48 @@ def compute_metrics(samples: list[dict] | None = None) -> dict:
     }
 
 
+# ── model selection ─────────────────────────────────────────────────────────
+# Voice mimicry is the one task where model size matters most: small models
+# regress to generic AI prose no matter how good the prompt is. Prefer the
+# largest suitable model installed in Ollama; fall back to llama3.2.
+
+_STYLE_MODEL_PREFERENCE = ["qwen2.5:14b", "llama3.1:8b", "llama3.1", "llama3.2"]
+_style_llm = None
+_style_model_name: str | None = None
+
+
+def pick_style_model() -> str:
+    global _style_model_name
+    if _style_model_name:
+        return _style_model_name
+    try:
+        import urllib.request
+        with urllib.request.urlopen("http://localhost:11434/api/tags", timeout=3) as r:
+            installed = {m["name"] for m in json.load(r)["models"]}
+        # names may or may not carry ":latest"
+        norm = {n.removesuffix(":latest") for n in installed} | installed
+        for want in _STYLE_MODEL_PREFERENCE:
+            if want in norm or f"{want}:latest" in norm:
+                _style_model_name = want
+                return want
+    except Exception:
+        pass
+    _style_model_name = "llama3.2"
+    return _style_model_name
+
+
+def get_style_llm():
+    """LLM used for style analysis + generation. Slightly warm temperature —
+    voice replication needs natural variation, not deterministic flatness."""
+    global _style_llm
+    if _style_llm is None:
+        from langchain_ollama import ChatOllama
+        model = pick_style_model()
+        print(f"Style Studio using model: {model}")
+        _style_llm = ChatOllama(model=model, temperature=0.8)
+    return _style_llm
+
+
 # ── LLM profile + generation ────────────────────────────────────────────────
 
 def _samples_blob(max_chars: int = 6000) -> str:
@@ -190,10 +232,18 @@ def build_generation_messages(task: str, mode: str = "write"):
 
     profile = get_profile() or {}
     samples = list_samples()
-    # 2-3 representative excerpts as few-shot anchors
-    few_shot = "\n\n".join(
-        f"EXAMPLE OF MY WRITING:\n{s['text'][:900]}" for s in samples[:3]
-    )
+
+    # Feed the FULL corpus (budgeted) — with a small personal corpus, every
+    # sentence of real writing is worth more than any description of it.
+    budget = 12000
+    parts, used = [], 0
+    for s in samples:
+        text = s["text"][: max(0, budget - used)]
+        if not text:
+            break
+        parts.append(f'--- Sample: "{s["title"]}" ---\n{text}')
+        used += len(text)
+    corpus = "\n\n".join(parts)
 
     profile_desc = ""
     for k in ("voice_summary", "tone", "sentence_style", "vocabulary", "punctuation", "structure"):
@@ -205,20 +255,31 @@ def build_generation_messages(task: str, mode: str = "write"):
         profile_desc += "- Never do: " + "; ".join(profile["avoid"]) + "\n"
 
     system = (
-        "You are a ghostwriter who writes EXACTLY in one specific person's voice. "
-        "Match their rhythm, vocabulary, punctuation, and structure precisely. "
-        "Do not explain what you are doing. Do not add commentary. Output only the "
-        "writing itself, as if the person wrote it.\n\n"
-        f"THE PERSON'S STYLE:\n{profile_desc or '(no profile yet — infer from the examples below)'}\n\n"
-        f"{few_shot}"
+        "You are ghostwriting for one specific person. Your ONLY job is to be "
+        "indistinguishable from them. Their real writing is below — it outranks "
+        "every instinct you have about 'good writing'.\n\n"
+        f"THEIR ACTUAL WRITING:\n{corpus}\n\n"
+        f"STYLE NOTES:\n{profile_desc or '(infer everything from the samples)'}\n\n"
+        "HARD RULES:\n"
+        "1. Imitate the samples' sentence rhythm: match how long their sentences "
+        "run, where they break, how they open and close.\n"
+        "2. Use only vocabulary this person would use. If a word doesn't appear "
+        "in or near the register of the samples, don't use it.\n"
+        "3. NO generic AI prose: no 'delve', 'crucial', 'furthermore', 'in "
+        "conclusion', 'it's important to note', no bullet-point essays, no "
+        "balanced-on-the-one-hand hedging — unless the samples themselves do it.\n"
+        "4. Keep their imperfections. If they write fragments, write fragments. "
+        "If they ramble, ramble. Polish is a tell.\n"
+        "5. Output ONLY the writing itself. No preamble, no explanation, no title "
+        "unless asked."
     )
 
     if mode == "rewrite":
         user = (
-            "Rewrite the following text so it sounds exactly like me, keeping the "
-            f"meaning but matching my voice completely:\n\n{task}"
+            "Rewrite this so it reads exactly like the samples — same meaning, "
+            f"their voice:\n\n{task}"
         )
     else:  # write
-        user = f"Write the following in my voice:\n\n{task}"
+        user = f"Write this in their voice:\n\n{task}"
 
     return [SystemMessage(content=system), HumanMessage(content=user)]
