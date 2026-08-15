@@ -26,15 +26,16 @@ case "$ans" in
 esac
 
 # Safety net: stash the current state before overwriting.
-if [ -d "$ROOT/db" ] || [ -d "$ROOT/uploads" ]; then
+PRE=()
+for d in db uploads style homework; do
+  [ -d "$ROOT/$d" ] && PRE+=("$d")
+done
+if [ ${#PRE[@]} -gt 0 ]; then
   SAFETY="$ROOT/backups/pre-restore-$(date +%Y%m%d-%H%M%S).tar.gz"
   mkdir -p "$ROOT/backups"
-  PRE=()
-  [ -d "$ROOT/db" ]      && PRE+=("db")
-  [ -d "$ROOT/uploads" ] && PRE+=("uploads")
   tar -czf "$SAFETY" -C "$ROOT" "${PRE[@]}"
   echo "Current state saved to $SAFETY (in case you need to undo)."
-  rm -rf "$ROOT/db" "$ROOT/uploads"
+  for d in "${PRE[@]}"; do rm -rf "${ROOT:?}/$d"; done
 fi
 
 tar -xzf "$ARCHIVE" -C "$ROOT"

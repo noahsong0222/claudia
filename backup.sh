@@ -13,8 +13,10 @@ mkdir -p "$DEST"
 
 # Build the list of things that actually exist (db/ may be absent on a fresh repo).
 ITEMS=()
-[ -d "$ROOT/db" ]      && ITEMS+=("db")
-[ -d "$ROOT/uploads" ] && ITEMS+=("uploads")
+[ -d "$ROOT/db" ]       && ITEMS+=("db")
+[ -d "$ROOT/uploads" ]  && ITEMS+=("uploads")
+[ -d "$ROOT/style" ]    && ITEMS+=("style")
+[ -d "$ROOT/homework" ] && ITEMS+=("homework")
 
 if [ ${#ITEMS[@]} -eq 0 ]; then
   echo "Nothing to back up — no db/ or uploads/ found in $ROOT."

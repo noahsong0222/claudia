@@ -12,6 +12,12 @@ interface Confidence { score: number; label: "High" | "Medium" | "Low"; strong_s
 interface Flashcard { q: string; a: string; }
 interface QuizQuestion { q: string; options: string[]; answer: string; explanation: string; }
 interface SearchResult { text: string; filename: string; class_name: string; score: number; }
+interface HwTask {
+  id: string; title: string; class_name: string; due_date: string | null;
+  priority: "high" | "medium" | "low"; notes: string; status: "todo" | "done";
+  created_at: string; completed_at: string | null; days_left: number | null; overdue: boolean;
+}
+interface HwStats { total: number; todo: number; done: number; overdue: number; due_week: number; }
 interface StyleSample { id: string; title: string; text: string; words: number; added_at: string; }
 interface StyleMetrics {
   empty: boolean; samples?: number; total_words?: number; total_sentences?: number;
@@ -1621,6 +1627,199 @@ function ConvRow({ conv, active, onLoad, onDelete }: { conv: ConvMeta; active: b
   );
 }
 
+// ── homework tracker ───────────────────────────────────────────────────────────
+function dueLabel(t: HwTask): { text: string; color: string } {
+  if (t.status === "done") return { text: "done", color: "var(--green)" };
+  if (t.days_left === null) return { text: "no due date", color: "var(--muted)" };
+  if (t.days_left < 0) return { text: `${-t.days_left}d overdue`, color: "var(--red)" };
+  if (t.days_left === 0) return { text: "due today", color: "var(--red)" };
+  if (t.days_left === 1) return { text: "due tomorrow", color: "var(--amber)" };
+  if (t.days_left <= 7) return { text: `due in ${t.days_left}d`, color: "var(--amber)" };
+  return { text: `due in ${t.days_left}d`, color: "var(--muted)" };
+}
+
+const PRIO_COLOR: Record<string, string> = { high: "var(--red)", medium: "var(--amber)", low: "var(--muted)" };
+
+function HomeworkView({ classes }: { classes: string[] }) {
+  const [tasks, setTasks] = useState<HwTask[]>([]);
+  const [stats, setStats] = useState<HwStats | null>(null);
+  const [title, setTitle] = useState("");
+  const [className, setClassName] = useState("");
+  const [due, setDue] = useState("");
+  const [priority, setPriority] = useState<"high" | "medium" | "low">("medium");
+  const [err, setErr] = useState<string | null>(null);
+  const [filterClass, setFilterClass] = useState<string | null>(null);
+  const [showDone, setShowDone] = useState(false);
+  const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [notesDraft, setNotesDraft] = useState("");
+
+  async function refresh() {
+    const d = await apiGet("homework");
+    setTasks(d.tasks ?? []);
+    setStats(d.stats ?? null);
+  }
+  useEffect(() => { refresh(); }, []);
+
+  async function addTask() {
+    if (!title.trim()) return;
+    setErr(null);
+    const res = await fetch("/api/homework", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, class_name: className, due_date: due, priority }),
+    });
+    if (res.ok) { setTitle(""); setDue(""); refresh(); }
+    else { const e = await res.json().catch(() => ({})); setErr(e.detail ?? "Failed to add"); }
+  }
+
+  async function patch(id: string, fields: Record<string, unknown>) {
+    await fetch(`/api/homework/${id}`, {
+      method: "PATCH", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(fields),
+    }).catch(() => {});
+    refresh();
+  }
+
+  async function remove(id: string) {
+    await fetch(`/api/homework/${id}`, { method: "DELETE" }).catch(() => {});
+    refresh();
+  }
+
+  const taskClasses = [...new Set([...classes, ...tasks.map(t => t.class_name).filter(Boolean)])].sort();
+  const visible = tasks.filter(t =>
+    (showDone || t.status !== "done") &&
+    (!filterClass || t.class_name === filterClass)
+  );
+
+  return (
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+      {/* header: stats */}
+      <div style={{ padding: "14px 20px", borderBottom: "1px solid var(--line)", display: "flex", alignItems: "center", gap: 16, flexShrink: 0 }}>
+        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)" }}>Homework</span>
+        {stats && (
+          <div style={{ display: "flex", gap: 14, fontSize: 11 }}>
+            <span style={{ color: "var(--text2)" }}><b style={{ color: "var(--accent)" }}>{stats.todo}</b> open</span>
+            {stats.overdue > 0 && <span style={{ color: "var(--red)" }}><b>{stats.overdue}</b> overdue</span>}
+            <span style={{ color: "var(--text2)" }}><b style={{ color: "var(--amber)" }}>{stats.due_week}</b> due this week</span>
+            <span style={{ color: "var(--muted)" }}>{stats.done} done</span>
+          </div>
+        )}
+        <button onClick={() => setShowDone(v => !v)} style={{
+          marginLeft: "auto", fontSize: 10, padding: "3px 10px", borderRadius: 20, cursor: "pointer", fontFamily: "inherit",
+          background: showDone ? "var(--accent-bg)" : "transparent",
+          border: `1px solid ${showDone ? "var(--accent)" : "var(--line2)"}`,
+          color: showDone ? "var(--accent)" : "var(--muted)",
+        }}>{showDone ? "hide done" : "show done"}</button>
+      </div>
+
+      {/* quick add */}
+      <div style={{ padding: "12px 20px", borderBottom: "1px solid var(--line)", display: "flex", gap: 8, flexWrap: "wrap", flexShrink: 0, alignItems: "center" }}>
+        <input value={title} onChange={e => setTitle(e.target.value)} onKeyDown={e => e.key === "Enter" && addTask()}
+          placeholder="Add homework… e.g. Read ch. 12 + questions"
+          style={{ flex: 1, minWidth: 200, background: "var(--panel2)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "8px 12px", color: "var(--text)", fontFamily: "inherit", fontSize: 12, outline: "none", caretColor: "var(--accent)" }} />
+        <input value={className} onChange={e => setClassName(e.target.value)} placeholder="Class" list="hw-class-list"
+          style={{ width: 120, background: "var(--panel2)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "8px 10px", color: "var(--text)", fontFamily: "inherit", fontSize: 12, outline: "none" }} />
+        <datalist id="hw-class-list">{taskClasses.map(c => <option key={c} value={c} />)}</datalist>
+        <input type="date" value={due} onChange={e => setDue(e.target.value)}
+          style={{ background: "var(--panel2)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "7px 10px", color: due ? "var(--text)" : "var(--muted)", fontFamily: "inherit", fontSize: 12, outline: "none", colorScheme: "dark" }} />
+        <div style={{ display: "flex", gap: 2, background: "var(--panel2)", borderRadius: 20, padding: 2 }}>
+          {(["high", "medium", "low"] as const).map(p => (
+            <button key={p} onClick={() => setPriority(p)} title={`${p} priority`} style={{
+              fontSize: 10, padding: "4px 10px", borderRadius: 20, border: "none", cursor: "pointer", fontFamily: "inherit",
+              background: priority === p ? "var(--line)" : "transparent",
+              color: priority === p ? PRIO_COLOR[p] : "var(--muted)", fontWeight: priority === p ? 600 : 400,
+            }}>{p === "medium" ? "med" : p}</button>
+          ))}
+        </div>
+        <button onClick={addTask} disabled={!title.trim()} style={{
+          padding: "8px 18px", borderRadius: "var(--radius-sm)", border: "none", fontFamily: "inherit", fontSize: 12, cursor: "pointer", fontWeight: 500,
+          background: title.trim() ? "var(--accent)" : "var(--line)", color: title.trim() ? "#fff" : "var(--muted)",
+        }}>Add</button>
+        {err && <div style={{ color: "var(--red)", fontSize: 11, width: "100%" }}>{err}</div>}
+      </div>
+
+      {/* class filter pills */}
+      {taskClasses.length > 0 && (
+        <div style={{ padding: "8px 20px", borderBottom: "1px solid var(--line)", display: "flex", gap: 4, flexWrap: "wrap", flexShrink: 0 }}>
+          {taskClasses.map(c => (
+            <button key={c} onClick={() => setFilterClass(filterClass === c ? null : c)} style={{
+              fontSize: 10, padding: "2px 10px", borderRadius: 20, cursor: "pointer", fontFamily: "inherit",
+              background: filterClass === c ? "var(--accent-bg)" : "transparent",
+              border: `1px solid ${filterClass === c ? "var(--accent)" : "var(--line2)"}`,
+              color: filterClass === c ? "var(--accent)" : "var(--muted)",
+            }}>{c}</button>
+          ))}
+        </div>
+      )}
+
+      {/* task list */}
+      <div style={{ flex: 1, overflow: "auto", padding: "12px 20px" }}>
+        {visible.length === 0 && (
+          <div style={{ textAlign: "center", color: "var(--muted)", paddingTop: 60, fontSize: 12 }}>
+            <div style={{ fontSize: 24, marginBottom: 10 }}>☑</div>
+            {tasks.length === 0 ? "Nothing tracked yet. Add your first assignment above." : "Nothing matches this filter."}
+          </div>
+        )}
+        {visible.map(t => {
+          const dl = dueLabel(t);
+          const isDone = t.status === "done";
+          const expanded = expandedId === t.id;
+          return (
+            <div key={t.id} style={{
+              border: `1px solid ${t.overdue ? "rgba(248,113,113,0.35)" : "var(--line2)"}`,
+              borderRadius: "var(--radius-sm)", marginBottom: 6, background: t.overdue ? "rgba(248,113,113,0.05)" : "var(--panel2)",
+              opacity: isDone ? 0.55 : 1, transition: "opacity 0.15s",
+            }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px" }}>
+                {/* checkbox */}
+                <button onClick={() => patch(t.id, { status: isDone ? "todo" : "done" })} style={{
+                  width: 16, height: 16, borderRadius: 4, flexShrink: 0, cursor: "pointer",
+                  border: `1.5px solid ${isDone ? "var(--green)" : "var(--line2)"}`,
+                  background: isDone ? "var(--green)" : "transparent",
+                  color: "#000", fontSize: 10, lineHeight: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 0,
+                }}>{isDone ? "✓" : ""}</button>
+                {/* priority dot */}
+                <span title={`${t.priority} priority`} style={{ width: 6, height: 6, borderRadius: "50%", background: PRIO_COLOR[t.priority], flexShrink: 0 }} />
+                <div style={{ flex: 1, minWidth: 0, cursor: "pointer" }} onClick={() => { setExpandedId(expanded ? null : t.id); setNotesDraft(t.notes); }}>
+                  <span style={{ fontSize: 12, color: "var(--text)", textDecoration: isDone ? "line-through" : "none" }}>{t.title}</span>
+                  {t.class_name && <span style={{ fontSize: 10, color: "var(--accent)", marginLeft: 8 }}>{t.class_name}</span>}
+                  {t.notes && !expanded && <span style={{ fontSize: 10, color: "var(--muted)", marginLeft: 8 }}>✎</span>}
+                </div>
+                <span style={{ fontSize: 10, color: dl.color, flexShrink: 0, fontWeight: t.overdue || t.days_left === 0 ? 600 : 400 }}>{dl.text}</span>
+                <button onClick={() => remove(t.id)} title="delete" style={{
+                  background: "none", border: "none", color: "var(--muted)", cursor: "pointer", fontSize: 13, lineHeight: 1, padding: "0 2px", flexShrink: 0,
+                }}
+                  onMouseEnter={e => e.currentTarget.style.color = "var(--red)"}
+                  onMouseLeave={e => e.currentTarget.style.color = "var(--muted)"}>×</button>
+              </div>
+              {expanded && (
+                <div style={{ padding: "0 12px 10px 42px", display: "flex", flexDirection: "column", gap: 8 }}>
+                  <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                    <input type="date" value={t.due_date ?? ""} onChange={e => patch(t.id, { due_date: e.target.value })}
+                      style={{ background: "var(--panel)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "5px 8px", color: "var(--text)", fontFamily: "inherit", fontSize: 11, outline: "none", colorScheme: "dark" }} />
+                    <div style={{ display: "flex", gap: 2, background: "var(--panel)", borderRadius: 20, padding: 2 }}>
+                      {(["high", "medium", "low"] as const).map(p => (
+                        <button key={p} onClick={() => patch(t.id, { priority: p })} style={{
+                          fontSize: 10, padding: "3px 9px", borderRadius: 20, border: "none", cursor: "pointer", fontFamily: "inherit",
+                          background: t.priority === p ? "var(--line)" : "transparent",
+                          color: t.priority === p ? PRIO_COLOR[p] : "var(--muted)",
+                        }}>{p === "medium" ? "med" : p}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <textarea value={notesDraft} onChange={e => setNotesDraft(e.target.value)}
+                    onBlur={() => { if (notesDraft !== t.notes) patch(t.id, { notes: notesDraft }); }}
+                    placeholder="Notes… (saved when you click away)" rows={2}
+                    style={{ background: "var(--panel)", border: "1px solid var(--line2)", borderRadius: "var(--radius-sm)", padding: "7px 10px", color: "var(--text)", fontFamily: "inherit", fontSize: 11, outline: "none", resize: "vertical", lineHeight: 1.5 }} />
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 // ── style studio ───────────────────────────────────────────────────────────────
 function StatCard({ label, value, hint }: { label: string; value: string | number; hint?: string }) {
   return (
@@ -1878,11 +2077,12 @@ function Sidebar({ view, setView, files, classes, chunkCount, onViewFile, width,
   }, [onResize]);
 
   const navItems = [
-    { id: "chat",   label: "Chat",    icon: "◎" },
-    { id: "upload", label: "Library", icon: "↑" },
-    { id: "style",  label: "Style",   icon: "✶" },
-    { id: "graph",  label: "Graph",   icon: "⟐" },
-    { id: "docs",   label: "Docs",    icon: "?" },
+    { id: "chat",     label: "Chat",     icon: "◎" },
+    { id: "upload",   label: "Library",  icon: "↑" },
+    { id: "homework", label: "Homework", icon: "☑" },
+    { id: "style",    label: "Style",    icon: "✶" },
+    { id: "graph",    label: "Graph",    icon: "⟐" },
+    { id: "docs",     label: "Docs",     icon: "?" },
   ];
 
   return (
@@ -2053,6 +2253,7 @@ export default function App() {
           />
         )}
         {view === "upload" && <UploadView files={files} onRefresh={refresh} onViewFile={setViewingFile} />}
+        {view === "homework" && <HomeworkView classes={classes} />}
         {view === "style"  && <StyleView />}
         {view === "graph"  && <Graph />}
         {view === "docs"   && <DocsView />}

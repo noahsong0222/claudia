@@ -19,9 +19,24 @@ from ingest import (
 )
 from rag import search, get_all_chunks, _llm, _SYSTEM, RELEVANCE_FLOOR, NOT_FOUND_MSG
 import style as style_studio
+import homework as hw
 from langchain_core.messages import HumanMessage, SystemMessage
 
 app = FastAPI(title="Claudia API")
+
+
+@app.exception_handler(Exception)
+async def unhandled_exception(request, exc):
+    """Always return JSON (never bare 'Internal Server Error' text) so the
+    frontend can show a real message. Detect the #1 failure: Ollama down."""
+    from fastapi.responses import JSONResponse
+    msg = str(exc)
+    if "Connection refused" in msg or "ConnectError" in type(exc).__name__:
+        return JSONResponse(status_code=503, content={
+            "detail": "Can't reach Ollama — open the Ollama app (or run 'ollama serve') and try again."
+        })
+    return JSONResponse(status_code=500, content={"detail": f"Server error: {msg[:200]}"})
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -648,12 +663,21 @@ def style_profile():
     return {"profile": style_studio.get_profile()}
 
 
+OLLAMA_DOWN_MSG = "Can't reach Ollama — open the Ollama app (or run 'ollama serve') and try again."
+
+
 @app.post("/style/analyze")
 def style_analyze():
     try:
         return {"profile": style_studio.build_profile(_llm)}
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        # most common cause: Ollama not running / model missing
+        msg = str(e)
+        if "Connection refused" in msg or "ConnectError" in type(e).__name__:
+            raise HTTPException(status_code=503, detail=OLLAMA_DOWN_MSG)
+        raise HTTPException(status_code=500, detail=f"Analysis failed: {msg[:200]}")
 
 
 @app.post("/style/generate")
@@ -666,13 +690,66 @@ async def style_generate(req: StyleGenRequest):
     messages = style_studio.build_generation_messages(req.task, req.mode)
 
     async def stream():
-        for chunk in _llm.stream(messages):
-            if chunk.content:
-                yield f"data: {json.dumps({'token': chunk.content})}\n\n"
+        try:
+            for chunk in _llm.stream(messages):
+                if chunk.content:
+                    yield f"data: {json.dumps({'token': chunk.content})}\n\n"
+        except Exception:
+            yield f"data: {json.dumps({'token': OLLAMA_DOWN_MSG})}\n\n"
         yield f"data: {json.dumps({'done': True})}\n\n"
 
     return StreamingResponse(stream(), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+# ── Homework tracker ───────────────────────────────────────────────────────────
+
+class HomeworkCreate(BaseModel):
+    title: str
+    class_name: str = ""
+    due_date: str = ""      # ISO date "2026-08-20" or ""
+    priority: str = "medium"
+    notes: str = ""
+
+
+class HomeworkUpdate(BaseModel):
+    title: str | None = None
+    class_name: str | None = None
+    due_date: str | None = None
+    priority: str | None = None
+    notes: str | None = None
+    status: str | None = None
+
+
+@app.get("/homework")
+def homework_list():
+    return {"tasks": hw.list_tasks(), "stats": hw.stats()}
+
+
+@app.post("/homework")
+def homework_add(req: HomeworkCreate):
+    try:
+        return hw.add_task(req.title, req.class_name, req.due_date, req.priority, req.notes)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+
+@app.patch("/homework/{task_id}")
+def homework_update(task_id: str, req: HomeworkUpdate):
+    try:
+        task = hw.update_task(task_id, **req.model_dump())
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if task is None:
+        raise HTTPException(status_code=404, detail="Task not found")
+    return task
+
+
+@app.delete("/homework/{task_id}")
+def homework_delete(task_id: str):
+    if not hw.delete_task(task_id):
+        raise HTTPException(status_code=404, detail="Task not found")
+    return {"deleted": task_id}
 
 
 if __name__ == "__main__":
